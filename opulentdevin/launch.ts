@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const appRoot = fileURLToPath(new URL('.', import.meta.url))
-const entry = process.argv.includes('--built') ? 'dist/main.js' : 'main.tsx'
+const entry = process.argv.includes('--built') ? 'dist/native-entry.js' : 'main.tsx'
 let compositor: ReturnType<typeof spawn> | undefined
 let app: ReturnType<typeof spawn> | undefined
 let runtime: string | undefined

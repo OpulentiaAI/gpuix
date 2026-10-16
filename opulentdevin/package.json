@@ -8,8 +8,8 @@
     "dev": "bun --hot main.tsx",
     "desktop": "bun launch.ts",
     "bootstrap": "bun bootstrap-zuse.ts",
-    "build": "bun build main.tsx --target=bun --outdir=dist --external @gpuix/native --external @gpuix/react --external react --external effect --external playwright-core --external @xterm/headless --external sharp",
-    "start": "bun dist/main.js",
+    "build": "bun build main.tsx native-entry.ts --target=bun --outdir=dist --external @gpuix/native --external @gpuix/react --external react --external effect --external playwright-core --external @xterm/headless --external sharp",
+    "start": "bun dist/native-entry.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

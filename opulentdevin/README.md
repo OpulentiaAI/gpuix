@@ -18,7 +18,7 @@ The bootstrap checks out Zuse revision `ff7b4db6b15c8445c323ad39278905e951ecf13b
 
 `install-native.ts` verifies the reviewed manifest and every file hash, then installs the custom editor and window-close renderer outside npm under `.native-runtime/releases/<binary-sha256>`, retaining older releases. `main.tsx` activates it before dynamically importing GPUIX, so an npm reinstall cannot silently replace the tested native editor with the stock binary. The verified delivery is Linux x64; other platforms need a separately generated, tested build. The source patch and complete native runtime delivery accompany the review checkpoint.
 
-`bun run build` emits the app bundle; `bun run start` runs it with installed native dependencies and the pinned Zuse runtime. This is not a signed platform installer. Neither command publishes a release or deploys a service.
+`bun run build` emits the app bundle and a separate native bootstrap entry; `bun run start` runs `dist/native-entry.js`, which verifies and activates the pinned native runtime before importing the application bundle. `bun launch.ts --built` uses the same entry. `bun native-test.ts --built` exercises the packaged entry rather than the source entry. This is not a signed platform installer. Neither command publishes a release or deploys a service.
 
 ## Architecture and state
 

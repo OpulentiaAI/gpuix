@@ -34,7 +34,7 @@ async function bounded<T>(promise: Promise<T>, label: string, ms = 30000): Promi
   finally { clearTimeout(timer) }
 }
 async function click(id: string) { if (!app) throw new Error('App unavailable'); await app.getByTestId(id).waitFor({ timeoutMs: 5000 }); await delay(150); await app.getByTestId(id).click() }
-async function text(value: string) { if (!app) throw new Error('App unavailable'); await delay(100); const found = (await app.getByText(value).all()).filter(node => node.text === value); if (found.length !== 1) throw new Error(`Exact text ${value}: ${found.length} matches`); const bounds = found[0].bounds ?? (await app.call('getBounds', { elementId: found[0].id })).bounds; if (!bounds) throw new Error(`No bounds for ${value}`); await app.mouse.click({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }) }
+async function text(value: string) { if (!app) throw new Error('App unavailable'); await app.getByText(value).waitFor({ timeoutMs: 5000 }); const found = (await app.getByText(value).all()).filter(node => node.text === value); if (found.length !== 1) throw new Error(`Exact text ${value}: ${found.length} matches`); const bounds = found[0].bounds ?? (await app.call('getBounds', { elementId: found[0].id })).bounds; if (!bounds) throw new Error(`No bounds for ${value}`); await app.mouse.click({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }) }
 async function selectChat(chatId: string, sessionId: string) {
   await click(`session-${chatId}`)
   for (let attempt = 0; attempt < 30; attempt++) { const prefs = JSON.parse(await readFile(join(data, 'ui.json'), 'utf8')) as { sessionId: string }; if (prefs.sessionId === sessionId) { await delay(100); return }; await delay(100) }
@@ -53,7 +53,7 @@ async function selectedComposer(expected: string) {
   await app!.getByTestId('composer').press('backspace')
 }
 async function start() {
-  app = await launch({ command: '/opulent/work/toolchain/node_modules/.bin/bun', args: ['main.tsx'], cwd: import.meta.dir, env })
+  app = await launch({ command: '/opulent/work/toolchain/node_modules/.bin/bun', args: [process.argv.includes('--built') ? 'dist/native-entry.js' : 'main.tsx'], cwd: import.meta.dir, env })
   await bounded(app.getByTestId('workbench-toggle').waitFor({ timeoutMs: 30000 }), 'native launch')
 }
 try {

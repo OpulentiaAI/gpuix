@@ -189,6 +189,12 @@ export function createRendererState(renderer: NativeRenderer): RendererState {
         else run()
       }
 
+      if (event.eventType === "closeRequested" && event.elementId === 0) {
+        if (!root.handlers.onEvent) return false
+        schedule(() => {})
+        return true
+      }
+
       if (event.eventType === "windowKeyDown" || event.eventType === "windowKeyUp") {
         if (event.elementId !== root.windowKeyEventId) return false
         const keyDown = event.eventType === "windowKeyDown"
@@ -215,8 +221,7 @@ export function createRendererState(renderer: NativeRenderer): RendererState {
         })
         return true
       }
-      if (event.eventType === "selectionChange") {
-        if (event.elementId !== root.windowSelectionEventId) return false
+      if (event.eventType === "selectionChange" && event.elementId === root.windowSelectionEventId) {
         const handler = root.handlers.onSelectionChange
         if (!handler) return false
         schedule(() => handler({ ...event, elementId: 0 }, renderer))

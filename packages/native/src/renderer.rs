@@ -44,21 +44,55 @@ use crate::retained_tree::{RetainedTree, StyleTable};
 use crate::style::StyleDesc;
 use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
 use crate::theme::Theme;
+use crate::close_guard::{CloseDecision, CloseGuard};
+
+fn request_window_close(guard: &Arc<Mutex<CloseGuard>>, callback: &Option<EventCallback>) -> bool {
+    let (decision, generation) = {
+        let mut guard = guard.lock().unwrap();
+        (guard.request(), guard.generation)
+    };
+    match decision {
+        CloseDecision::Allow => true,
+        CloseDecision::Pending => false,
+        CloseDecision::Request(id) => {
+            emit_event_full(callback, 0, "closeRequested", |payload| {
+                payload.close_request_id = Some(id);
+                payload.window_generation = Some(generation.to_string());
+            });
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn request_app_menu_quit(cx: &mut gpui::App) {
+    let windows = cx.windows();
+    if windows.is_empty() { cx.quit(); return; }
+    for window in windows {
+        if let Some(window) = window.downcast::<GpuixView>() {
+            if let Err(error) = window.update(cx, |view, window, _cx| {
+                if request_window_close(&view.close_guard, &view.event_callback) {
+                    window.remove_window();
+                }
+            }) { log::warn!("Window close request failed: {error}"); }
+        }
+    }
+}
 
 /// The Window menu items act on the focused window, and the root element is the
 /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
 #[cfg(target_os = "macos")]
-fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
+fn with_window_menu_actions(root: gpui::Div, guard: Arc<Mutex<CloseGuard>>, callback: Option<EventCallback>) -> gpui::Div {
     use crate::app_menu::{CloseWindow, MinimizeWindow, ZoomWindow};
     use gpui::prelude::*;
 
     root.on_action(|_: &MinimizeWindow, window, _cx| window.minimize_window())
         .on_action(|_: &ZoomWindow, window, _cx| window.zoom_window())
-        .on_action(|_: &CloseWindow, window, _cx| window.remove_window())
+        .on_action(move |_: &CloseWindow, window, _cx| { if request_window_close(&guard, &callback) { window.remove_window(); } })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
+fn with_window_menu_actions(root: gpui::Div, _guard: Arc<Mutex<CloseGuard>>, _callback: Option<EventCallback>) -> gpui::Div {
     root
 }
 
@@ -392,6 +426,7 @@ enum ClockControl {
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 enum UiCommand {
     Invalidate,
+    ResolveClose { request_id: String },
     ActivateWindow,
     MinimizeWindow,
     ZoomWindow,
@@ -517,6 +552,9 @@ async fn run_ui_commands(
     while let Some(command) = commands.next().await {
         let result = match command {
             UiCommand::Invalidate => refresh_ui_window(window, cx),
+            UiCommand::ResolveClose { request_id } => window.update(cx, |view, window, _cx| {
+                if view.close_guard.lock().unwrap().consume_approval(&request_id) { window.remove_window(); }
+            }),
             UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
                 cx.activate(true);
                 window.activate_window();
@@ -905,6 +943,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[napi]
 pub struct GpuixRenderer {
+    close_guard: Arc<Mutex<CloseGuard>>,
     event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
     tree: Arc<Mutex<RetainedTree>>,
     initialized: Arc<Mutex<bool>>,
@@ -1118,6 +1157,7 @@ impl GpuixRenderer {
     pub fn new(event_callback: Option<ThreadsafeFunction<EventPayload>>) -> Self {
         let _ = env_logger::try_init();
         Self {
+            close_guard: Arc::new(Mutex::new(CloseGuard::default())),
             event_callback: Mutex::new(event_callback.map(Arc::new)),
             tree: Arc::new(Mutex::new(RetainedTree::new())),
             initialized: Arc::new(Mutex::new(false)),
@@ -1127,6 +1167,34 @@ impl GpuixRenderer {
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             ui_running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[napi]
+    pub fn set_close_guard(&self, enabled: bool) {
+        self.close_guard.lock().unwrap().set_enabled(enabled);
+    }
+
+    #[napi]
+    pub fn resolve_close_request(&self, request_id: String, allow: bool) -> Result<bool> {
+        if !self.close_guard.lock().unwrap().resolve(&request_id, allow) { return Ok(false); }
+        if !allow { return Ok(true); }
+        #[cfg(target_os = "macos")]
+        {
+            let guard = self.close_guard.clone();
+            return update_window(move |view, window, _cx| {
+                if Arc::ptr_eq(&guard, &view.close_guard) && guard.lock().unwrap().consume_approval(&request_id) {
+                    window.remove_window();
+                    true
+                } else { false }
+            });
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        {
+            self.send_ui_command(UiCommand::ResolveClose { request_id })?;
+            return Ok(true);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+        Err(Error::from_reason("Unsupported operating system"))
     }
 
     /// Initialize GPUI using the native event-loop architecture for this OS.
@@ -1181,6 +1249,7 @@ impl GpuixRenderer {
 
         let tree = self.tree.clone();
         let callback = self.event_callback_for_view();
+        let close_guard = self.close_guard.clone();
 
         let selection = self.selection.clone();
         let opened_window = Rc::new(RefCell::new(None));
@@ -1205,9 +1274,14 @@ impl GpuixRenderer {
 
             match cx.open_window(
                 to_gpui_window_options(&window_options, bounds),
-                |_window, cx| {
+                |window, cx| {
+                    let guard = close_guard.clone();
+                    let events = callback.clone();
+                    window.on_window_should_close(cx, move |_, _| request_window_close(&guard, &events));
                     cx.new(|_| {
-                        GpuixView::new(tree.clone(), callback.clone(), title, selection.clone())
+                        let mut view = GpuixView::new(tree.clone(), callback.clone(), title, selection.clone());
+                        view.close_guard = close_guard.clone();
+                        view
                     })
                 },
             ) {
@@ -1307,6 +1381,7 @@ impl GpuixRenderer {
         let tree = self.tree.clone();
         let selection = self.selection.clone();
         let callback = self.event_callback_for_view();
+        let close_guard = self.close_guard.clone();
         let (command_sender, command_receiver) = mpsc::unbounded();
         let (startup_sender, startup_receiver) = sync_channel(1);
         let exit_startup_sender = startup_sender.clone();
@@ -1340,8 +1415,15 @@ impl GpuixRenderer {
                             };
                             let window = match cx.open_window(
                                 to_gpui_window_options(&window_options, bounds),
-                                |_window, cx| {
-                                    cx.new(|_| GpuixView::new(tree, callback, title, selection))
+                                |window, cx| {
+                                    let guard = close_guard.clone();
+                                    let events = callback.clone();
+                                    window.on_window_should_close(cx, move |_, _| request_window_close(&guard, &events));
+                                    cx.new(|_| {
+                                        let mut view = GpuixView::new(tree, callback, title, selection);
+                                        view.close_guard = close_guard;
+                                        view
+                                    })
                                 },
                             ) {
                                 Ok(window) => window,
@@ -3484,6 +3566,7 @@ impl Drop for GpuixRenderer {
 // ── GPUI View ────────────────────────────────────────────────────────
 
 pub(crate) struct GpuixView {
+    close_guard: Arc<Mutex<CloseGuard>>,
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
     pub(crate) event_callback: Option<EventCallback>,
     pub(crate) window_title: String,
@@ -3804,6 +3887,7 @@ impl GpuixView {
         selection: SharedSelection,
     ) -> Self {
         Self {
+            close_guard: Arc::new(Mutex::new(CloseGuard::default())),
             tree,
             event_callback,
             window_title,
@@ -5028,7 +5112,7 @@ impl gpui::Render for GpuixView {
             let drag_move_view = cx.weak_entity();
             let drag_end_view = drag_move_view.clone();
             let root = gpui::div().size_full();
-            with_window_menu_actions(root)
+            with_window_menu_actions(root, self.close_guard.clone(), callback.clone())
                 .child(window_key_events(
                     callback.clone(),
                     self.window_key_down,

@@ -37,6 +37,39 @@ class RecordingRenderer implements MutationHost, WindowSizeHost, WindowInsetsHos
 }
 
 describe("shared host runtime", () => {
+  it("delivers native close requests to the root event observer", () => {
+    const state = createRendererState(new RecordingRenderer())
+    const events: unknown[] = []
+    const root = state.attach({ onEvent: (event) => events.push(event) })
+    const request = { elementId: 0, eventType: "closeRequested", closeRequestId: "7:1", windowGeneration: "7" }
+    expect(state.dispatch(request)).toBe(true)
+    expect(events).toEqual([request])
+    expect(state.dispatch({ ...request, elementId: 42 })).toBe(false)
+    root.detach()
+  })
+
+  it("routes editor selection events separately from window selection", () => {
+    const renderer = new RecordingRenderer()
+    const state = createRendererState(renderer)
+    const editorEvents: unknown[] = []
+    const windowEvents: unknown[] = []
+    const root = state.attach({
+      onSelectionChange: (event) => windowEvents.push(event),
+      schedule: (dispatch) => dispatch(),
+    })
+    root.eventHandlers.set(42, new Map([["selectionChange", (event) => editorEvents.push(event)]]))
+    const event = { elementId: 42, eventType: "selectionChange", revision: 1,
+      selectionStart: 1, selectionEnd: 3, selectionReversed: true, composing: false }
+    expect(state.dispatch(event)).toBe(true)
+    expect(editorEvents).toEqual([event])
+    expect(windowEvents).toEqual([])
+    expect(state.dispatch({ elementId: root.windowSelectionEventId, eventType: "selectionChange", value: "document" })).toBe(true)
+    expect(windowEvents).toEqual([{ elementId: 0, eventType: "selectionChange", value: "document" }])
+    expect(editorEvents).toHaveLength(1)
+    root.detach()
+  })
+
+
   it("queues mutations from an applyBatch-only host", () => {
     const batches: unknown[][] = []
     const renderer: MutationHost = {

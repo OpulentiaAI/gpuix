@@ -95,6 +95,7 @@ export const EVENT_PROPS = [
   ["onMotionComplete", "motionComplete"],
   ["onChange", "change"],
   ["onSubmit", "submit"],
+  ["onSelectionChange", "selectionChange"],
   ["onClick", "click"],
   ["onAuxClick", "auxClick"],
   ["onMouseDown", "mouseDown"],

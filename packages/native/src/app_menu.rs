@@ -49,7 +49,7 @@ pub(crate) fn init(app_name: &str, cx: &mut App) {
         gpui::KeyBinding::new("cmd-w", CloseWindow, None),
     ]);
 
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_action(|_: &Quit, cx: &mut App| crate::renderer::request_app_menu_quit(cx));
     cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
     cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());

@@ -100,6 +100,13 @@ pub struct EventPayload {
     /// linkClick (the URL); `selectionChange` (joined selected text, or
     /// absent when the selection is empty).
     pub value: Option<String>,
+    pub revision: Option<u32>,
+    pub selection_start: Option<f64>,
+    pub selection_end: Option<f64>,
+    pub selection_reversed: Option<bool>,
+    pub composing: Option<bool>,
+    pub close_request_id: Option<String>,
+    pub window_generation: Option<String>,
 
     /// Line number on the pre-change side. Populated for: `<diff>` lineClick.
     pub old_line: Option<f64>,
@@ -162,6 +169,13 @@ impl Default for EventPayload {
             touch_phase: None,
             hovered: None,
             value: None,
+            revision: None,
+            selection_start: None,
+            selection_end: None,
+            selection_reversed: None,
+            composing: None,
+            close_request_id: None,
+            window_generation: None,
             old_line: None,
             new_line: None,
             start_index: None,

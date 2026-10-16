@@ -11,6 +11,10 @@ Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, 
 Everything above is GPUIX: the glass window, the cards, the schedule,
 and native text.
 
+## OpulentDevin native application
+
+[`opulentdevin/`](./opulentdevin/README.md) is an isolated, in-progress AGPL-3.0-only application using this native renderer and Zuse's pinned headless services. It renders composer, transcript, workspace, editor, terminal and settings controls with GPUI primitives, not Electron or a webview. Its README documents setup, browser connection boundaries, verification and remaining parity limits. This application does not change the framework's Apache-2.0 licence. The native editor and close-guard extensions are documented below.
+
 ## Quickstart
 
 Create an app from the official example. The command downloads only
@@ -1809,6 +1813,62 @@ that height. An explicit `height` still overrides both.
   onChange={(event) => setDraft(event.value ?? '')}
 />
 ```
+
+### Native window close confirmation
+
+Desktop renderers expose `setCloseGuard(enabled)` and
+`resolveCloseRequest(requestId, allow)`. Enable the guard before `init()` or
+before allowing edits. While enabled, the OS window close callback returns
+false immediately and sends `closeRequested` through the renderer callback
+(and the root `onEvent` callback). Its `elementId` is zero, `closeRequestId` is
+an opaque string, and `windowGeneration` is a string identifying this window
+lifecycle. Keep the ID unchanged when answering. Only one request is pending;
+repeated close attempts do not open additional prompts.
+
+`resolveCloseRequest(id, false)` denies the request. Passing true queues removal
+of the exact window on its UI thread. The return value reports whether the
+pending request was accepted, not whether the OS has finished closing. Stale,
+foreign-generation and already-resolved IDs return false. Disabling the guard
+invalidates pending requests and queued approvals without closing the window.
+No native callback waits for JavaScript. If no callback handles the request,
+the guarded window remains open until the host disables the guard or resolves it.
+
+The GPUIX macOS menu's Close Window and Quit actions use the same gate. This is
+**not an OS application-termination veto**: forced termination and platform-level
+application Quit can bypass window close. GPUI's `on_app_quit` is notification
+only. Hosts must still persist recoverable drafts independently.
+
+### Editable syntax and caret selection
+
+`<textarea language="typescript" path="src/app.ts" />` colours the editable text
+with the existing Syntect grammars and `theme.syntax` palette. `language` takes
+precedence over the path extension. Unknown languages and content beyond the
+512 KiB highlighting limit stay plain. Highlighting changes only text colours:
+the same native editor owns input, selection, undo, wrapping and IME underlines.
+It is not an LSP, multi-cursor or full code-editor implementation.
+
+Inputs and textareas accept `onSelectionChange`. Its payload contains
+`selectionStart`, `selectionEnd` (ordered UTF-16 offsets), `selectionReversed`
+(the caret is at the start when true), `revision`, and `composing`. These fields
+also accompany `onChange`. A selection event is emitted after the initial render
+and subsequent observed changes, outside the render callback. Intermediate
+selection movements may be coalesced into the next frame. The revision starts
+at zero for each mounted editor and advances for native edits, undo/redo and
+external value replacement; acknowledging a native change does not advance it.
+
+To move the caret or select a find result, set
+`selectionRequest={{ requestId: 1, revision, start, end, reversed: false }}`.
+Use a strictly increasing unsigned 32-bit `requestId` for each attempt and the
+latest revision received from this editor. Offsets must be ordered, in bounds,
+and on whole-grapheme boundaries (never inside a surrogate pair or combining
+sequence). A stale revision, invalid range or active IME composition rejects the
+request without altering text, selection, marked text or undo history. An attempt
+is consumed even when rejected; resend only with a newer ID and current state.
+A repeated prop cannot recapture the caret after the user moves it. Accepted
+requests reveal the caret but do not steal focus. Selection-only moves do not
+advance the content revision. Request IDs and revisions are local to a mounted
+editor; remounting starts a new sequence. Do not reuse state across editor keys.
+The element callback is distinct from window-level document selection.
 
 ### Scrollbars
 

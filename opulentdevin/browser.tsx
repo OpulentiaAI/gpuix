@@ -8,19 +8,25 @@ import { palettes, type Palette } from './theme'
 export function BrowserImage({ frame, onInput, width = 720, height = 450 }: { frame: BrowserFrame; onInput: (input: BrowserInput) => void; width?: number; height?: number }) {
   const image = useRef<ImgInstance>(null)
   const surface = useRef<PublicInstance>(null)
+  const pressed = useRef<{x:number;y:number;button:'left'|'middle'|'right';count:number} | null>(null)
   const { renderer } = useGpuix()
   useLayoutEffect(() => { image.current?.setImage(frame.bytes) }, [frame])
   function point(event: EventPayload) {
     const bounds = image.current && renderer?.getElementBounds?.(image.current.id)
     return bounds && event.x !== undefined && event.y !== undefined ? browserPoint(event.x, event.y, bounds, frame) : null
   }
-  function click(event: EventPayload) {
-    const position = point(event)
-    if (!position) return
-    if (surface.current) renderer?.focusElement?.(surface.current.id)
-    onInput({ kind: 'click', ...position, count: event.clickCount ?? 1, button: event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left' })
+  function down(event: EventPayload) {
+    const position=point(event); if(!position)return
+    if(surface.current)renderer?.focusElement?.(surface.current.id)
+    pressed.current={...position,button:event.button===2?'right':event.button===1?'middle':'left',count:event.clickCount??1}
   }
-  return <div ref={surface} testId="browser-surface" tabIndex={0} style={{ width, height, flexShrink: 0 }} onClick={click} onAuxClick={click} onKeyDown={event => { const input = browserKey(event); if (input) onInput(input) }} onScroll={event => {
+  function up(event: EventPayload) {
+    const start=pressed.current;pressed.current=null;if(!start)return
+    const end=point(event);if(!end)return
+    if(Math.hypot(end.x-start.x,end.y-start.y)>4)onInput({kind:'drag',from:{x:start.x,y:start.y},to:end,button:start.button})
+    else onInput({kind:'click',x:start.x,y:start.y,button:start.button,count:start.count})
+  }
+  return <div ref={surface} testId="browser-surface" tabIndex={0} style={{ width, height, flexShrink: 0 }} onMouseDown={down} onMouseMove={() => {}} onMouseUp={up} onKeyDown={event => { const input = browserKey(event); if (input) onInput(input) }} onScroll={event => {
     const position = point(event)
     if (position) onInput({ kind: 'scroll', ...position, deltaX: -(event.deltaX ?? 0) * (event.precise ? 1 : 40), deltaY: -(event.deltaY ?? 0) * (event.precise ? 1 : 40) })
   }}><img ref={image} testId="browser-image" alt="Live isolated browser page" objectFit="fill" style={{ width, height }} /></div>
@@ -105,6 +111,8 @@ export function BrowserPane({ onError, palette = palettes.dark, backend, session
       </div>
       <div style={{ color: palette.muted, fontSize: 11 }}>{frame.url}</div>
       {host.current?.pendingDialog() && <div style={{ gap: 6 }}><text>{host.current.pendingDialog()?.message}</text><div style={{ flexDirection: 'row', gap: 8 }}>{(['accept', 'dismiss'] as const).map(action => <div key={action} style={button} onClick={() => { const current = host.current; if (current) void current.command({ _tag: 'Dialog', action, promptText: action === 'accept' ? text : undefined }).catch(failure) }}>{action === 'accept' ? 'Accept dialog (text field supplies prompt)' : 'Dismiss dialog'}</div>)}</div></div>}
+      <div style={{flexDirection:'row',gap:8}}><div testId="browser-download-enable" style={button} onClick={()=>void run(browser=>browser.enableDownloads())}>Allow downloads (2 files, 10 MiB each)</div><div testId="browser-download-disable" style={button} onClick={()=>void run(browser=>browser.disableDownloads())}>Disable downloads</div></div>
+      {host.current?.downloadState().items.map(item=><div key={item.id} style={{gap:4}}><text>{item.name}: {item.state} · {item.bytes} bytes {item.path??item.reason??''}</text>{item.state==='receiving'&&<div style={button} onClick={()=>{void host.current?.cancelDownload(item.id).catch(failure)}}>Cancel download</div>}</div>)}
       <BrowserImage frame={frame} onInput={input => { const current = host.current; if (current) void current.input(input).catch(failure) }} />
       <div style={{ flexDirection: 'row', gap: 8 }}>
         <input testId="browser-text" value={text} placeholder="Unicode text to insert into the focused page field" style={{ width: 440, backgroundColor: palette.elevated, color: palette.text, padding: 7 }} onChange={event => setText(event.value ?? '')} onSubmit={() => void run(browser => browser.input({ kind: 'text', text }))} />
@@ -117,6 +125,6 @@ export function BrowserPane({ onError, palette = palettes.dark, backend, session
       </div>
       {inspection && <div style={{ gap: 8 }}><div style={{ flexDirection: 'row', gap: 6 }}>{(['text', 'accessibility', 'console', 'network'] as const).map(name => <div key={name} style={{ ...button, backgroundColor: name === tab ? palette.selected : palette.elevated }} onClick={() => setTab(name)}>{name}</div>)}</div><div style={{ maxHeight: 240, overflow: 'scroll', padding: 10, backgroundColor: palette.wash }}><text style={{ fontFamily: 'monospace', fontSize: 12 }}>{inspectionText || 'No entries.'}</text></div></div>}
     </>}
-    <div style={{ color: palette.muted, fontSize: 12 }}>Native image bridge · refreshed every 750 ms. No imported cookies or existing tabs. Recording uses local ffmpeg, has no audio and stops after 60 seconds. Credential injection, downloads, remote forwarding, drag and IME composition are not yet supported.</div>
+    <div style={{ color: palette.muted, fontSize: 12 }}>Native image bridge · refreshed every 750 ms. No imported cookies or existing tabs. Recording uses local ffmpeg, has no audio and stops after 60 seconds. Downloads are opt-in, saved privately without opening; native drag replays a bounded straight-line gesture on release. Credential injection, remote forwarding and IME composition are not yet supported.</div>
   </div>
 }

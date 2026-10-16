@@ -1,7 +1,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, flushSync, handleGpuixEvent, type NativeRenderer } from '@gpuix/react'
-import { BrowserPane } from './browser'
+import { BrowserPane, BrowserImage } from './browser'
 import { NativeBrowserHost } from './browser-host'
 import * as browserHost from './browser-host'
 import type { Backend } from './backend'
@@ -18,6 +18,17 @@ function harness() {
   return { root, render, connect, ids }
 }
 describe('BrowserPane visibility lifetime', () => {
+  it('translates native press/release into one bounded drag without duplicate click', () => {
+    let surface = 0
+    const inputs = vi.fn()
+    const renderer: NativeRenderer = { applyBatch: raw => { for(const [kind,id,key,value] of JSON.parse(raw)) if(kind==='setCustomProp'&&key==='testId'&&value==='browser-surface')surface=id;return [] },setImage:vi.fn(),focusElement:vi.fn(),getElementBounds:()=>({x:0,y:0,width:720,height:450}) }
+    const root=createRoot(renderer)
+    try {
+      flushSync(()=>root.render(React.createElement(BrowserImage,{frame,onInput:inputs})))
+      for(const event of [{eventType:'mouseDown',x:10,y:20},{eventType:'mouseMove',x:80,y:90},{eventType:'mouseUp',x:100,y:120},{eventType:'click',x:100,y:120}])flushSync(()=>{handleGpuixEvent({elementId:surface,...event,button:0},renderer)})
+      expect(inputs).toHaveBeenCalledOnce();expect(inputs.mock.calls[0][0]).toMatchObject({kind:'drag',from:{x:10*960/720,y:20*600/450},to:{x:100*960/720,y:120*600/450}})
+    }finally{root.unmount()}
+  })
   it('keeps command ownership while hidden and releases it on backend change', async () => {
     vi.spyOn(NativeBrowserHost.prototype, 'connect').mockResolvedValue(frame)
     const disconnect = vi.spyOn(NativeBrowserHost.prototype, 'disconnect').mockResolvedValue()

@@ -7,6 +7,7 @@ import { BrowserCommandResult, type BrowserCommand, type BrowserTarget, type Bro
 import type { Backend } from './backend'
 import type { AgentSessionId } from './zuse-runtime/packages/contracts/src/ids'
 import { dataDirectory } from './preferences'
+import { NativeBrowserDownloads } from './browser-media-downloads'
 import { NativeBrowserRecording, decorateBrowserImage, overlaySvg } from './browser-media'
 import type { BrowserOverlayShape } from './zuse-runtime/packages/contracts/src/browser-shared'
 
@@ -41,7 +42,7 @@ export const browserTestPage = 'data:text/html;charset=utf-8,' + encodeURICompon
 export type BrowserFrame = { bytes: Buffer; url: string; title: string; width: number; height: number }
 export type BrowserNetworkEntry = { id?: string; method: string; url: string; status?: number; failed?: string }
 export type BrowserInspection = { text: string; accessibility: string; console: string[]; network: BrowserNetworkEntry[] }
-export type BrowserInput = { kind: 'click'; x: number; y: number; button?: 'left' | 'middle' | 'right'; count?: number } | { kind: 'key'; key: string } | { kind: 'text'; text: string } | { kind: 'scroll'; x: number; y: number; deltaX: number; deltaY: number }
+export type BrowserInput = { kind: 'drag'; from: {x:number;y:number}; to: {x:number;y:number}; button?: 'left' | 'middle' | 'right' } | { kind: 'click'; x: number; y: number; button?: 'left' | 'middle' | 'right'; count?: number } | { kind: 'key'; key: string } | { kind: 'text'; text: string } | { kind: 'scroll'; x: number; y: number; deltaX: number; deltaY: number }
 
 export function localBrowserEndpoint(value = process.env.OPULENTDEVIN_BROWSER_CDP): string {
   if (!value) throw new Error('Set OPULENTDEVIN_BROWSER_CDP to an explicitly authorised local Chromium CDP endpoint before connecting.')
@@ -80,6 +81,7 @@ function readableUrl(value: string) {
 }
 
 export class NativeBrowserHost {
+  private downloads = new NativeBrowserDownloads()
   private recording = new NativeBrowserRecording()
   private overlays: readonly BrowserOverlayShape[] = []
   private overlayUndo: (readonly BrowserOverlayShape[])[] = []
@@ -149,12 +151,23 @@ export class NativeBrowserHost {
   pendingDialog() { return this.dialog ? { type: this.dialog.type(), message: this.dialog.message().slice(0, 2000) } : null }
   frame() { return this.dialog ? this.capture() : this.serial(() => this.capture()) }
 
+  downloadState() { return { enabled: this.downloads.active, items: this.downloads.list() } }
+  enableDownloads() { return this.serial(async () => { const page=this.ownedPage(); await this.downloads.enable(this.browser!,page); return this.downloadState() }) }
+  cancelDownload(id: string) { return this.downloads.cancel(id) }
+  disableDownloads() { return this.serial(async () => { await this.downloads.close(); return this.downloadState() }) }
+
   input(input: BrowserInput) {
     return this.serial(async () => {
       const page = this.ownedPage()
       if (this.dialog) throw new Error(`Browser dialog pending: ${this.dialog.type()}. Use an explicit Dialog action.`)
       if (input.kind === 'click' || input.kind === 'scroll') {
         if (!Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= this.viewport.width || input.y >= this.viewport.height) throw new Error('Pointer is outside the browser viewport.')
+      }
+      if (input.kind === 'drag') {
+        for(const point of [input.from,input.to]) if(!browserPoint(point.x,point.y,{x:0,y:0,...this.viewport},this.viewport)) throw new Error('Drag point is outside the browser viewport.')
+        await page.mouse.move(input.from.x,input.from.y)
+        try { await page.mouse.down({button:input.button??'left'});await page.mouse.move(input.to.x,input.to.y,{steps:12}) }
+        finally { await page.mouse.up({button:input.button??'left'}) }
       }
       if (input.kind === 'click') await page.mouse.click(input.x, input.y, { button: input.button ?? 'left', clickCount: Math.min(3, Math.max(1, input.count ?? 1)) })
       if (input.kind === 'text') await page.keyboard.insertText(input.text)
@@ -367,6 +380,8 @@ export class NativeBrowserHost {
   }
 
   private async release() {
+    await this.downloads.close()
+    this.downloads = new NativeBrowserDownloads()
     if (this.recording.active) await this.recording.stop().catch(() => {})
     this.overlays=[];this.overlayUndo=[];this.overlayRedo=[]
     const context = this.context

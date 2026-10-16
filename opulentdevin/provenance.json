@@ -1,0 +1,8 @@
+{
+  "application": "OpulentDevin",
+  "nativeRenderer": { "repository": "https://github.com/OpulentiaAI/gpuix", "sourceRevision": "6a5c7c142ac32f9eb0caefe0121be995cfc18631", "releasePackage": "@gpuix/native@0.10.0", "adapterPackage": "@gpuix/react@0.10.0" },
+  "backend": { "repository": "https://github.com/Git-Godssoldier/zuse", "revision": "ff7b4db6b15c8445c323ad39278905e951ecf13b", "licence": "AGPL-3.0-only", "reuse": "Pinned original headless server, contracts, client runtime, domain reducers, provider drivers and host primitives" },
+  "designReference": { "repository": "https://github.com/OpulentiaAI/magicpath-component-archives", "revision": "415a10b178f180da5da3d45dfe5a58f8ceeb84d6", "allArchivesInspected": 141, "devinRelatedArchives": 73, "filesVerified": 1821, "privateCapturePayloadsIncluded": false, "runtimeMockConversationsIncluded": false },
+  "licenceBoundary": "Only opulentdevin/ is AGPL-3.0-only. The GPUIX framework retains its existing Apache-2.0 licence.",
+  "status": "In-progress native port; source provenance is not a full-parity or visual-fidelity claim."
+}

@@ -11,6 +11,10 @@ Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, 
 Everything above is GPUIX: the glass window, the cards, the schedule,
 and native text.
 
+## OpulentDevin native application
+
+[`opulentdevin/`](./opulentdevin/README.md) is an isolated, in-progress AGPL-3.0-only application using this native renderer and Zuse's pinned headless services. It renders composer, transcript, workspace, editor, terminal and settings controls with GPUI primitives, not Electron or a webview. Its README documents setup, browser connection boundaries, verification and remaining parity limits. This application does not change the framework's Apache-2.0 licence or public renderer API.
+
 ## Quickstart
 
 Create an app from the official example. The command downloads only

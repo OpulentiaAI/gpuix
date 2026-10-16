@@ -1,0 +1,30 @@
+{
+  "name": "opulentdevin",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot main.tsx",
+    "desktop": "bun launch.ts",
+    "bootstrap": "bun bootstrap-zuse.ts",
+    "build": "bun build main.tsx --target=bun --outdir=dist --external @gpuix/native --external @gpuix/react --external react --external effect --external playwright-core --external @xterm/headless",
+    "start": "bun dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gpuix/react": "0.10.0",
+    "@gpuix/native": "0.10.0",
+    "react": "19.2.4",
+    "effect": "4.0.0-beta.102",
+    "@xterm/headless": "6.0.0",
+    "playwright-core": "1.60.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "@types/react": "19.2.14",
+    "typescript": "5.9.3",
+    "vitest": "4.0.18"
+  }
+}

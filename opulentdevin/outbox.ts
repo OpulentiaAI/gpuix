@@ -6,6 +6,10 @@ import { CommandId, MessageId, ChatId, AgentSessionId, EnvironmentId } from './z
 import { MessagesSendRpc, ChatCreateRpc } from './zuse-runtime/packages/contracts/src/session.ts'
 import { assertCommandFingerprint, commandFingerprint, canonicalClientCommandJson } from './zuse-runtime/packages/client-runtime/src/client-persistence.ts'
 
+export function hasComposerContent(input: NonNullable<SendPayload['input']>): boolean {
+  return Boolean(input.text.trim() || input.attachments.length || input.fileRefs.length || input.skillRefs.length || input.annotations.length)
+}
+
 export type SendPayload = typeof MessagesSendRpc.payloadSchema.Type
 export type CreatePayload = typeof ChatCreateRpc.payloadSchema.Type
 export type OutgoingCommand =

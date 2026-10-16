@@ -7,6 +7,8 @@ import { BrowserCommandResult, type BrowserCommand, type BrowserTarget, type Bro
 import type { Backend } from './backend'
 import type { AgentSessionId } from './zuse-runtime/packages/contracts/src/ids'
 import { dataDirectory } from './preferences'
+import { NativeBrowserRecording, decorateBrowserImage, overlaySvg } from './browser-media'
+import type { BrowserOverlayShape } from './zuse-runtime/packages/contracts/src/browser-shared'
 
 export const browserViewport = { width: 960, height: 600 }
 type BrowserBackend = Pick<Backend, 'subscribe' | 'run'> & { client: {
@@ -78,6 +80,10 @@ function readableUrl(value: string) {
 }
 
 export class NativeBrowserHost {
+  private recording = new NativeBrowserRecording()
+  private overlays: readonly BrowserOverlayShape[] = []
+  private overlayUndo: (readonly BrowserOverlayShape[])[] = []
+  private overlayRedo: (readonly BrowserOverlayShape[])[] = []
   private browser: Browser | null = null
   private context: BrowserContext | null = null
   private page: Page | null = null
@@ -135,7 +141,7 @@ export class NativeBrowserHost {
   private async capture(): Promise<BrowserFrame> {
     const page = this.ownedPage()
     if (this.dialog && this.lastFrame) return { ...this.lastFrame, title: `Dialog pending (${this.dialog.type()}) — displayed frame is paused` }
-    const frame = { bytes: await page.screenshot({ type: 'png', timeout: 10000 }), url: readableUrl(page.url()), title: await page.title(), ...this.viewport }
+    const frame = { bytes: await decorateBrowserImage(await page.screenshot({ type: 'png', timeout: 10000 }), this.overlays), url: readableUrl(page.url()), title: await page.title(), ...this.viewport }
     this.lastFrame = frame
     return frame
   }
@@ -186,7 +192,7 @@ export class NativeBrowserHost {
       })
       this.refs.set(ref, handle); lines.push(`${ref} ${JSON.stringify(description)}`)
     }
-    return { snapshot: ((await page.locator('body').ariaSnapshot()).slice(0, 16000) + '\n\nTargets:\n' + lines.join('\n')), ...(screenshot ? { screenshot: (await page.screenshot({ type: 'png', fullPage: screenshot === 'full-page', timeout: 10000 })).toString('base64') } : {}) }
+    return { snapshot: ((await page.locator('body').ariaSnapshot()).slice(0, 16000) + '\n\nTargets:\n' + lines.join('\n')), ...(screenshot ? { screenshot: (await decorateBrowserImage(await page.screenshot({ type: 'png', fullPage: screenshot === 'full-page', timeout: 10000 }), this.overlays)).toString('base64') } : {}) }
   }
 
   private target(page: Page, target?: BrowserTarget, ref?: string): Locator {
@@ -219,6 +225,14 @@ export class NativeBrowserHost {
           else await dialog.dismiss()
           this.dialog = null; return
         }
+        case 'RecordingStart': return this.recording.start(page, () => this.overlays)
+        case 'RecordingStop': return this.recording.stop()
+        case 'Overlay': {
+          if (command.action === 'undo') { const previous=this.overlayUndo.pop(); if (!previous) throw new Error('Nothing to undo.'); this.overlayRedo.push(this.overlays);this.overlays=previous }
+          else if(command.action==='redo'){const next=this.overlayRedo.pop();if(!next)throw new Error('Nothing to redo.');this.overlayUndo.push(this.overlays);this.overlays=next}
+          else { let next:readonly BrowserOverlayShape[]=[];if(command.action==='add'){if(!command.shape)throw new Error('Overlay add requires shape.');next=[...this.overlays.filter(shape=>shape.id!==command.shape!.id),command.shape]}else if(command.action==='remove'){if(!command.id)throw new Error('Overlay remove requires id.');next=this.overlays.filter(shape=>shape.id!==command.id)};overlaySvg(next,this.viewport.width,this.viewport.height);this.overlayUndo=[...this.overlayUndo.slice(-19),this.overlays];this.overlayRedo=[];this.overlays=next }
+          return {overlays:this.overlays}
+        }
         case 'Evaluate': {
           if (command.expression.length > 20000) throw new Error('Page expression exceeds 20000 characters.')
           const cdp = await this.context!.newCDPSession(page)
@@ -232,6 +246,7 @@ export class NativeBrowserHost {
           } finally { clearTimeout(timer); await cdp.detach() }
         }
         case 'Resize': {
+          if (this.recording.active) throw new Error('Stop recording before resizing the browser viewport.')
           if (command.lockAspectRatio) throw new Error('Persistent aspect-ratio locking is not supported.')
           const sizes = { fill: browserViewport, phone: { width: 390, height: 844 }, tablet: { width: 768, height: 1024 }, laptop: { width: 1366, height: 768 }, desktop: { width: 1920, height: 1080 }, custom: { width: command.width ?? 0, height: command.height ?? 0 } }
           let { width, height } = sizes[command.mode]
@@ -324,7 +339,7 @@ export class NativeBrowserHost {
           const directory = join(dataDirectory, 'browser-captures')
           await mkdir(directory, { recursive: true, mode: 0o700 })
           const path = join(directory, `${randomUUID()}.png`)
-          await writeFile(path, await page.screenshot({ type: 'png', fullPage: command.fullPage, timeout: 10000 }), { mode: 0o600, flag: 'wx' })
+          await writeFile(path, await decorateBrowserImage(await page.screenshot({ type: 'png', fullPage: command.fullPage, timeout: 10000 }), this.overlays), { mode: 0o600, flag: 'wx' })
           return path
         }
         default: throw new Error(`Browser command ${command._tag} is not implemented by the native local surface.`)
@@ -352,6 +367,8 @@ export class NativeBrowserHost {
   }
 
   private async release() {
+    if (this.recording.active) await this.recording.stop().catch(() => {})
+    this.overlays=[];this.overlayUndo=[];this.overlayRedo=[]
     const context = this.context
     const browser = this.browser
     this.clearRefs(); this.responses.clear(); this.dialog = null; this.lastFrame = null

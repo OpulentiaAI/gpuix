@@ -2,8 +2,10 @@ import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { Outbox, prepareMessage, prepareChat, type OutgoingCommand } from './outbox'
+import { Outbox, prepareMessage, prepareChat, hasComposerContent, type OutgoingCommand } from './outbox'
 import { AgentSessionId, EnvironmentId, FolderId } from '../../zuse/packages/contracts/src/ids.ts'
+
+import { ComposerInput } from './zuse-runtime/packages/contracts/src/composer'
 
 const roots: string[] = []
 const environment = EnvironmentId.make('native-test-environment')
@@ -17,6 +19,17 @@ const message = () => prepareMessage({ sessionId: AgentSessionId.make('session-t
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('native durable outgoing command outbox', () => {
+  it('accepts each rich input kind including annotation-only submissions', () => {
+    const empty = ComposerInput.make({ text: '  ', attachments: [], fileRefs: [], skillRefs: [], annotations: [] })
+    expect(hasComposerContent(empty)).toBe(false)
+    for (const partial of [
+      { text: 'Prompt' },
+      { attachments: [{ id: 'image', mimeType: 'image/png', originalName: 'image.png' }] },
+      { fileRefs: [{ absPath: '/project/file.ts', relPath: 'file.ts', kind: 'file' as const }] },
+      { skillRefs: [{ name: 'review', scope: 'project' as const, args: '', providerId: 'codex' as const }] },
+      { annotations: [{ id: 'annotation', absPath: '/project/file.ts', relPath: 'file.ts', startLine: 1, endLine: 1, comment: 'Explain this' }] },
+    ]) expect(hasComposerContent(ComposerInput.make({ ...empty, ...partial }))).toBe(true)
+  })
   it('persists exact send identities and payload before retry across process recreation', () => {
     const { path, outbox } = setup()
     const command = message()

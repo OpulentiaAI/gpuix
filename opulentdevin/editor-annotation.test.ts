@@ -1,0 +1,10 @@
+import { describe, it, expect } from 'vitest'
+import type { EditorSelectionEvent } from '@gpuix/native/host'
+import { captureAnnotation, confirmAnnotation } from './editor-annotation'
+const selection = (start: number, end: number, revision = 3): EditorSelectionEvent => ({ elementId: 1, eventType: 'selectionChange', revision, selectionStart: start, selectionEnd: end, selectionReversed: false, composing: false })
+describe('native annotation boundary', () => {
+  it('uses emitted UTF16 offsets and inclusive line bounds', () => { const value = 'one\n😀two\nthree'; const selected = selection(4, 10); const snapshot = captureAnnotation('a.ts', value, selected); expect(snapshot.selectedText).toBe('😀two\n'); expect(confirmAnnotation(snapshot, { path: 'a.ts', value, selection: selected }, '/repo/a.ts', ' Explain ', 'id')).toEqual({ id: 'id', relPath: 'a.ts', absPath: '/repo/a.ts', startLine: 2, endLine: 2, comment: 'Explain' }) })
+  it('rejects split surrogate and out-of-bounds or empty selections', () => { expect(() => captureAnnotation('a', '😀x', selection(1, 2))).toThrow(); expect(() => captureAnnotation('a', 'x', selection(0, 2))).toThrow(); expect(() => captureAnnotation('a', 'x', selection(0, 0))).toThrow() })
+  it('rejects stale revision even if selected bytes match', () => { const selected = selection(0, 2); const snapshot = captureAnnotation('a', 'ab', selected); expect(() => confirmAnnotation(snapshot, { path: 'a', value: 'ab', selection: selection(0, 2, 4) }, '/repo/a', 'note', 'id')).toThrow('changed') })
+  it('rejects value path selection and composition changes', () => { const selected = selection(0, 2); const snapshot = captureAnnotation('a', 'abc', selected); for (const current of [{ path: 'b', value: 'abc', selection: selected }, { path: 'a', value: 'abd', selection: selected }, { path: 'a', value: 'abc', selection: selection(1, 2) }, { path: 'a', value: 'abc', selection: { ...selected, composing: true } }]) expect(() => confirmAnnotation(snapshot, current, '/repo/a', 'note', 'id')).toThrow('changed') })
+})

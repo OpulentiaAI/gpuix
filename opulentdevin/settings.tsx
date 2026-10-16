@@ -9,7 +9,8 @@ import type { ApiEnvironmentList } from './zuse-runtime/packages/contracts/src/a
 import type { CloudAuthStatus } from './zuse-runtime/packages/contracts/src/cloud-auth'
 import type { CloudWorkspaceList } from './zuse-runtime/packages/contracts/src/cloud-workspaces'
 import { Icon } from './icons'
-import { metrics, palettes } from './theme'
+import { metrics } from './theme'
+import { usePalette, isActivationKey } from './theme-context'
 import { ModelSettings } from './settings-models'
 import { CloudSettings } from './settings-cloud'
 import { HostSettings } from './settings-host-panel'
@@ -27,7 +28,6 @@ export type SettingsPanelProps = {
 
 type Tab = 'General' | 'Providers' | 'Models' | 'Integrations' | 'Connections' | 'Cloud' | 'Host setup' | 'Coverage'
 type Remote<T> = { state: 'loading' } | { state: 'error' } | { state: 'ready'; value: T }
-const c = palettes.dark
 const providerIds: readonly ProviderId[] = ['claude', 'codex', 'grok', 'gemini', 'cursor', 'opencode', 'opencode2', 'kiro', 'pi']
 
 export const nativeSettingsCapabilities = [
@@ -48,15 +48,15 @@ export const nativeSettingsCapabilities = [
   ['Advanced services', 'Not implemented', 'Skills, voice, browser profiles, diagnostics, updates, usage, analytics, Linear, previews and notifications remain dedicated app/service integration work.'],
 ] as const
 
-function Action({ label, onClick, disabled = false, selected = false }: { label: string; onClick: () => void; disabled?: boolean; selected?: boolean }) {
-  return <div testId={`settings-action-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} role="button" aria-label={label} tabIndex={disabled ? -1 : 0} onClick={() => { if (!disabled) onClick() }} onKeyDown={event => { if (!disabled && (event.key === 'Enter' || event.key === ' ')) onClick() }} style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, paddingLeft: 10, paddingRight: 10, height: 30, justifyContent: 'center', borderRadius: metrics.rowRadius, backgroundColor: selected ? c.accentSoft : c.hover, borderWidth: 1, borderColor: selected ? c.accent : c.border, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1 }}><text style={{ fontSize: 12, color: selected ? c.accentText : c.text }}>{label}</text></div>
+function Action({ label, onClick, disabled = false, selected = false }: { label: string; onClick: () => void; disabled?: boolean; selected?: boolean }) { const c = usePalette();
+  return <div testId={`settings-action-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} role="button" aria-label={label} tabIndex={disabled ? -1 : 0} onClick={() => { if (!disabled) onClick() }} onKeyDown={event => { if (!disabled && isActivationKey(event.key)) onClick() }} style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, paddingLeft: 10, paddingRight: 10, height: 30, justifyContent: 'center', borderRadius: metrics.rowRadius, backgroundColor: selected ? c.accentSoft : c.hover, borderWidth: 1, borderColor: selected ? c.accent : c.border, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1 }}><text style={{ fontSize: 12, color: selected ? c.accentText : c.text }}>{label}</text></div>
 }
 
-function Note({ children, warning = false }: { children: ReactNode; warning?: boolean }) {
+function Note({ children, warning = false }: { children: ReactNode; warning?: boolean }) { const c = usePalette();
   return <text style={{ fontSize: 12, color: warning ? c.warning : c.secondary }}>{children}</text>
 }
 
-function Card({ title, children }: { title: string; children: ReactNode }) {
+function Card({ title, children }: { title: string; children: ReactNode }) { const c = usePalette();
   return <div style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, padding: 16, gap: 12, borderRadius: metrics.menuRadius, backgroundColor: c.elevated, borderWidth: 1, borderColor: c.border }}><text style={{ color: c.strong, fontSize: 14, fontWeight: 500 }}>{title}</text>{children}</div>
 }
 
@@ -82,7 +82,7 @@ function useRemote<T>(load: () => Promise<T>, onError: (error: unknown) => void,
   return { data, refresh: () => setRevision(value => value + 1) }
 }
 
-function General({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) {
+function General({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) { const c = usePalette();
   const load = useCallback(() => backend.settings.get(), [backend])
   const { data, refresh } = useRemote(load, onError, 'Settings')
   const [patch, setPatch] = useState<SettingsPatch>({})
@@ -127,7 +127,7 @@ function General({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onE
   </div>
 }
 
-function Providers({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) {
+function Providers({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) { const c = usePalette();
   const load = useCallback(async () => ({ providers: await backend.providers.list({ refresh: true }), settings: await backend.settings.get() }), [backend])
   const { data, refresh } = useRemote(load, onError, 'Provider availability')
   const [busy, setBusy] = useState<ProviderId | null>(null)
@@ -229,7 +229,7 @@ function Integrations({ backend, onError }: Pick<SettingsPanelProps, 'backend' |
   </div>
 }
 
-function Connections({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) {
+function Connections({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 'onError'>) { const c = usePalette();
   const environmentLoad = useCallback(() => backend.run(backend.client['environments.list']()), [backend])
   const workspaceLoad = useCallback(() => backend.run(backend.client['cloud.workspaces.list']({})), [backend])
   const authLoad = useCallback(() => backend.run(backend.client['cloud.auth.status']()), [backend])
@@ -259,7 +259,7 @@ function Connections({ backend, onError }: Pick<SettingsPanelProps, 'backend' | 
   </div>
 }
 
-export function SettingsPanel({ backend, onError, onClose, onConnect }: SettingsPanelProps) {
+export function SettingsPanel({ backend, onError, onClose, onConnect }: SettingsPanelProps) { const c = usePalette();
   const [tab, setTab] = useState<Tab>('General')
   return <div testId="settings-panel" style={{ display: 'flex',  width: '100%', height: '100%', minHeight: 0, backgroundColor: c.page, flexDirection: 'column' }}>
     <div style={{ display: 'flex',  height: 58, flexShrink: 0, flexDirection: 'row', alignItems: 'center', paddingLeft: 24, paddingRight: 24, gap: 12, borderBottomWidth: 1, borderColor: c.border }}><Icon name="settings" color={c.text} /><text style={{ color: c.strong, fontSize: 18, fontWeight: 500, flexGrow: 1 }}>Settings</text><Action label="Close" onClick={onClose} /></div>

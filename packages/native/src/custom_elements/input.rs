@@ -25,7 +25,104 @@ use web_time::Instant;
 
 use super::{CustomElement, CustomElementFactory, CustomRenderContext};
 use crate::renderer::{emit_event_full, emit_key_event, EventCallback};
+use crate::syntax::{cache::highlight_cached, HighlightedDocument};
 use crate::theme::Theme;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EditorSelectionRequest {
+    request_id: u32,
+    revision: u32,
+    start: usize,
+    end: usize,
+    #[serde(default)]
+    reversed: bool,
+}
+
+fn selection_request_range(
+    text: &str,
+    request: &EditorSelectionRequest,
+    revision: u32,
+    composing: bool,
+) -> Option<Range<usize>> {
+    if composing
+        || revision == u32::MAX
+        || request.revision != revision
+        || request.start > request.end
+    {
+        return None;
+    }
+    let mut start = None;
+    let mut end = None;
+    let mut offset = 0;
+    for (byte, grapheme) in text.grapheme_indices(true).chain([(text.len(), "")]) {
+        if offset == request.start {
+            start = Some(byte);
+        }
+        if offset == request.end {
+            end = Some(byte);
+        }
+        offset += grapheme.encode_utf16().count();
+    }
+    Some(start?..end?)
+}
+
+fn editor_text_runs(
+    text: &str,
+    base: TextRun,
+    document: Option<&HighlightedDocument>,
+    theme: &Theme,
+    marked: Option<&Range<usize>>,
+) -> Vec<TextRun> {
+    let mut spans = Vec::new();
+    let mut line_start = 0;
+    if let Some(document) = document {
+        for (line, highlights) in text.split_inclusive('\n').zip(&document.lines) {
+            for span in highlights {
+                spans.push((
+                    line_start + span.range.start..line_start + span.range.end,
+                    theme.syntax.color(span.kind),
+                ));
+            }
+            line_start += line.len();
+        }
+    }
+    let mut boundaries = vec![0, text.len()];
+    for (range, _) in &spans {
+        boundaries.extend([range.start, range.end]);
+    }
+    if let Some(marked) = marked {
+        boundaries.extend([marked.start, marked.end]);
+    }
+    boundaries.retain(|offset| *offset <= text.len() && text.is_char_boundary(*offset));
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut span_index = 0;
+    boundaries
+        .windows(2)
+        .map(|bounds| {
+            let start = bounds[0];
+            while span_index < spans.len() && spans[span_index].0.end <= start {
+                span_index += 1;
+            }
+            let mut run = base.clone();
+            run.len = bounds[1] - start;
+            if let Some((range, color)) = spans.get(span_index) {
+                if range.contains(&start) {
+                    run.color = *color;
+                }
+            }
+            if marked.is_some_and(|range| range.contains(&start)) {
+                run.underline = Some(UnderlineStyle {
+                    color: Some(run.color),
+                    thickness: px(1.0),
+                    wavy: false,
+                });
+            }
+            run
+        })
+        .collect()
+}
 
 actions!(
     gpuix_text_editor,
@@ -315,6 +412,10 @@ struct TextEditorElement {
     min_rows: usize,
     max_rows: usize,
     last_prop_value: Option<String>,
+    language: Option<String>,
+    path: Option<String>,
+    selection_request: Option<EditorSelectionRequest>,
+    syntax_dirty: bool,
     theme: Theme,
     state: Option<Entity<TextEditorState>>,
 }
@@ -329,6 +430,10 @@ impl TextEditorElement {
             min_rows: 1,
             max_rows: if multiline { 10 } else { 1 },
             last_prop_value: None,
+            language: None,
+            path: None,
+            selection_request: None,
+            syntax_dirty: false,
             theme: Theme::dark(),
             state: None,
         }
@@ -362,6 +467,7 @@ impl CustomElement for TextEditorElement {
                 let min_rows = self.min_rows;
                 let max_rows = self.max_rows;
                 let caret_color = self.theme.caret;
+                let theme = self.theme.clone();
                 let callback = callback.clone();
                 let id = ctx.id;
                 let cursor = value.len();
@@ -370,6 +476,13 @@ impl CustomElement for TextEditorElement {
                     element_id: id,
                     callback,
                     emits_change,
+                    emits_selection_change: false,
+                    revision: 0,
+                    last_selection: None,
+                    last_request_id: None,
+                    language: None,
+                    path: None,
+                    theme,
                     emits_submit,
                     emits_key_down,
                     emits_key_up,
@@ -413,6 +526,13 @@ impl CustomElement for TextEditorElement {
         state.update(cx, |state, cx| {
             state.callback = callback;
             state.emits_change = emits_change;
+            state.emits_selection_change = ctx.events.contains("selectionChange");
+            state.language = self.language.clone();
+            state.path = self.path.clone();
+            state.theme = self.theme.clone();
+            if self.syntax_dirty {
+                cx.notify();
+            }
             if state.emits_submit != emits_submit {
                 state.emits_submit = emits_submit;
                 cx.notify();
@@ -430,7 +550,30 @@ impl CustomElement for TextEditorElement {
             if prop_changed {
                 state.sync_prop_value(self.value.clone(), cx);
             }
+            if let Some(request) = &self.selection_request {
+                if state
+                    .last_request_id
+                    .is_none_or(|last| request.request_id > last)
+                {
+                    state.last_request_id = Some(request.request_id);
+                    if let Some(range) = selection_request_range(
+                        &state.content,
+                        request,
+                        state.revision,
+                        state.marked_range.is_some(),
+                    ) {
+                        state.selected_range = range;
+                        state.selection_reversed = request.reversed;
+                        state.follow_cursor = true;
+                        state.last_edit = None;
+                        state.reset_blink(cx);
+                        cx.notify();
+                    }
+                }
+            }
+            state.queue_selection_change(cx);
         });
+        self.syntax_dirty = false;
         self.last_prop_value = Some(self.value.clone());
 
         let element_id = gpui::SharedString::from(format!("__gpuix_editor_{}", ctx.id));
@@ -516,6 +659,9 @@ impl CustomElement for TextEditorElement {
     }
 
     fn set_prop(&mut self, key: &str, value: serde_json::Value) {
+        if matches!(key, "language" | "path" | "theme") {
+            self.syntax_dirty = true;
+        }
         match key {
             "value" => self.value = value.as_str().unwrap_or_default().to_string(),
             "placeholder" => self.placeholder = value.as_str().unwrap_or_default().to_string(),
@@ -527,6 +673,9 @@ impl CustomElement for TextEditorElement {
                     .unwrap_or(if self.multiline { 10 } else { 1 })
                     as usize
             }
+            "language" => self.language = value.as_str().map(str::to_owned),
+            "path" => self.path = value.as_str().map(str::to_owned),
+            "selectionRequest" => self.selection_request = serde_json::from_value(value).ok(),
             "theme" => self.theme = Theme::from_prop(Some(&value)),
             _ => {}
         }
@@ -539,13 +688,24 @@ impl CustomElement for TextEditorElement {
             "readOnly",
             "minRows",
             "maxRows",
+            "language",
+            "path",
+            "selectionRequest",
             "theme",
         ]
     }
 
     fn supported_events(&self) -> &'static [&'static str] {
         &[
-            "change", "submit", "click", "keyDown", "keyUp", "focus", "blur", "fileDrop",
+            "change",
+            "selectionChange",
+            "submit",
+            "click",
+            "keyDown",
+            "keyUp",
+            "focus",
+            "blur",
+            "fileDrop",
         ]
     }
 
@@ -638,6 +798,13 @@ struct TextEditorState {
     element_id: u64,
     callback: Option<EventCallback>,
     emits_change: bool,
+    emits_selection_change: bool,
+    revision: u32,
+    last_selection: Option<(u32, Range<usize>, bool, bool)>,
+    last_request_id: Option<u32>,
+    language: Option<String>,
+    path: Option<String>,
+    theme: Theme,
     emits_submit: bool,
     emits_key_down: bool,
     emits_key_up: bool,
@@ -676,6 +843,38 @@ struct TextEditorState {
 }
 
 impl TextEditorState {
+    fn queue_selection_change(&mut self, cx: &mut Context<Self>) {
+        let selection = (
+            self.revision,
+            self.selected_range.clone(),
+            self.selection_reversed,
+            self.marked_range.is_some(),
+        );
+        if !self.emits_selection_change {
+            self.last_selection = None;
+            return;
+        }
+        if self.last_selection.as_ref() == Some(&selection) {
+            return;
+        }
+        self.last_selection = Some(selection);
+        let callback = self.callback.clone();
+        let id = self.element_id;
+        let revision = self.revision;
+        let range = self.range_to_utf16(&self.selected_range);
+        let reversed = self.selection_reversed;
+        let composing = self.marked_range.is_some();
+        cx.defer(move |_| {
+            emit_event_full(&callback, id, "selectionChange", |payload| {
+                payload.revision = Some(revision);
+                payload.selection_start = Some(range.start as f64);
+                payload.selection_end = Some(range.end as f64);
+                payload.selection_reversed = Some(reversed);
+                payload.composing = Some(composing);
+            })
+        });
+    }
+
     fn reset_blink(&mut self, cx: &Context<Self>) {
         self.blink_anchor = cx.background_executor().now();
     }
@@ -725,6 +924,7 @@ impl TextEditorState {
             return;
         }
         self.content = value;
+        self.revision = self.revision.saturating_add(1);
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
@@ -740,6 +940,7 @@ impl TextEditorState {
     }
 
     fn emit_change(&mut self) {
+        self.revision = self.revision.saturating_add(1);
         if self.emits_change {
             self.pending_values.push_back(self.content.clone());
             while self.pending_values.len() > 32 {
@@ -747,6 +948,12 @@ impl TextEditorState {
             }
             emit_event_full(&self.callback, self.element_id, "change", |payload| {
                 payload.value = Some(self.content.clone());
+                payload.revision = Some(self.revision);
+                let range = self.range_to_utf16(&self.selected_range);
+                payload.selection_start = Some(range.start as f64);
+                payload.selection_end = Some(range.end as f64);
+                payload.selection_reversed = Some(self.selection_reversed);
+                payload.composing = Some(self.marked_range.is_some());
             });
         }
     }
@@ -1401,29 +1608,32 @@ impl TextEditorState {
         } else {
             style.color
         };
-        let run = |len: usize, underline: bool| TextRun {
-            len,
-            font: style.font(),
-            color,
-            background_color: None,
-            underline: underline.then_some(UnderlineStyle {
-                color: Some(color),
-                thickness: px(1.0),
-                wavy: false,
-            }),
-            strikethrough: None,
+        let document = if self.multiline
+            && !is_placeholder
+            && (self.language.is_some() || self.path.is_some())
+        {
+            highlight_cached(&display, self.path.as_deref(), self.language.as_deref())
+        } else {
+            None
         };
-        let runs = match self.marked_range.as_ref() {
-            Some(marked) if !is_placeholder => vec![
-                run(marked.start, false),
-                run(marked.len(), true),
-                run(display.len() - marked.end, false),
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect(),
-            _ => vec![run(display.len(), false)],
-        };
+        let runs = editor_text_runs(
+            &display,
+            TextRun {
+                len: display.len(),
+                font: style.font(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            document.as_deref(),
+            &self.theme,
+            if is_placeholder {
+                None
+            } else {
+                self.marked_range.as_ref()
+            },
+        );
         let wrap_width = self.multiline.then_some(width);
         let lines = window
             .text_system()
@@ -1653,6 +1863,7 @@ impl EntityInputHandler for TextEditorState {
 
 impl gpui::Render for TextEditorState {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.queue_selection_change(cx);
         let key_down_callback = self.callback.clone();
         let key_up_callback = self.callback.clone();
         let element_id = self.element_id;
@@ -1717,7 +1928,13 @@ impl gpui::Render for TextEditorState {
             })
             .when(self.emits_key_up, move |editor| {
                 editor.on_key_up(move |event, _window, _cx| {
-                    emit_key_event(&key_up_callback, element_id, "keyUp", &event.keystroke, None);
+                    emit_key_event(
+                        &key_up_callback,
+                        element_id,
+                        "keyUp",
+                        &event.keystroke,
+                        None,
+                    );
                 })
             })
             .w_full()
@@ -1935,6 +2152,83 @@ impl gpui::IntoElement for EditorTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_selection_requests_reject_stale_composing_and_split_graphemes() {
+        let text = "a😀e\u{301}z";
+        let mut request = EditorSelectionRequest {
+            request_id: 1,
+            revision: 7,
+            start: 1,
+            end: 3,
+            reversed: true,
+        };
+        assert_eq!(
+            selection_request_range(text, &request, 7, false),
+            Some(1..5)
+        );
+        assert_eq!(selection_request_range(text, &request, 8, false), None);
+        assert_eq!(selection_request_range(text, &request, 7, true), None);
+        request.revision = u32::MAX;
+        assert_eq!(
+            selection_request_range(text, &request, u32::MAX, false),
+            None
+        );
+        request.revision = 7;
+        request.start = 2;
+        assert_eq!(selection_request_range(text, &request, 7, false), None);
+        request.start = 3;
+        request.end = 4;
+        assert_eq!(selection_request_range(text, &request, 7, false), None);
+        request.end = 5;
+        assert_eq!(
+            selection_request_range(text, &request, 7, false),
+            Some(5..8)
+        );
+        request.end = 99;
+        assert_eq!(selection_request_range(text, &request, 7, false), None);
+        request.end = 1;
+        assert_eq!(selection_request_range(text, &request, 7, false), None);
+    }
+
+    #[test]
+    fn editor_runs_preserve_multiline_bytes_and_composition_under_syntax() {
+        use crate::syntax::{HighlightKind, HighlightSpan, LanguageId};
+        let text = "let 😀\n42";
+        let document = HighlightedDocument {
+            language: LanguageId::Rust,
+            lines: vec![
+                vec![HighlightSpan {
+                    range: 0..3,
+                    kind: HighlightKind::Keyword,
+                }],
+                vec![HighlightSpan {
+                    range: 0..2,
+                    kind: HighlightKind::Number,
+                }],
+            ],
+        };
+        let base = TextRun::default();
+        let theme = Theme::dark();
+        let runs = editor_text_runs(text, base.clone(), Some(&document), &theme, Some(&(1..8)));
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            vec![1, 2, 5, 1, 2]
+        );
+        assert_eq!(runs[0].color, theme.syntax.color(HighlightKind::Keyword));
+        assert_eq!(runs[4].color, theme.syntax.color(HighlightKind::Number));
+        assert!(runs[1].underline.is_some());
+        assert!(runs[2].underline.is_some());
+        assert!(runs[0].underline.is_none());
+        assert!(runs[3].underline.is_none());
+        assert!(runs.iter().all(|run| run.font == base.font));
+        assert!(editor_text_runs("", base.clone(), None, &theme, None).is_empty());
+        assert_eq!(
+            editor_text_runs("plain", base, None, &theme, None)[0].len,
+            5
+        );
+    }
 
     fn has_binding(bindings: &[KeyBinding], keystroke: &str, action: &dyn gpui::Action) -> bool {
         let keystroke = gpui::Keystroke::parse(keystroke).unwrap();

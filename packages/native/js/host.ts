@@ -515,7 +515,25 @@ export interface HostProps {
 }
 
 // Props for native text editor elements.
+export interface EditorSelectionRequest {
+  requestId: number
+  revision: number
+  start: number
+  end: number
+  reversed?: boolean
+}
+
+export interface EditorSelectionEvent extends EventPayload {
+  revision: number
+  selectionStart: number
+  selectionEnd: number
+  selectionReversed: boolean
+  composing: boolean
+}
+
 export interface InputProps extends HostProps {
+  selectionRequest?: EditorSelectionRequest
+  onSelectionChange?: (event: EditorSelectionEvent) => void
   /** External editor value. Native edits apply immediately and report through onChange. */
   value?: string
   placeholder?: string
@@ -524,6 +542,8 @@ export interface InputProps extends HostProps {
 }
 
 export interface TextareaProps extends InputProps {
+  language?: string
+  path?: string
   minRows?: number
   maxRows?: number
 }
@@ -672,7 +692,18 @@ export type WindowSizeHost = Pick<GpuixRenderer, "getWindowSize">
 export type WindowInsetsHost = Pick<GpuixRenderer, "getWindowInsets">
 export type SelectionHost = Pick<GpuixRenderer, "getSelectedText">
 /** `applyBatch` plus the live renderer methods a host may also expose. */
-export type NativeRenderer = MutationHost &
+export interface CloseRequestedEvent extends EventPayload {
+  eventType: "closeRequested"
+  closeRequestId: string
+  windowGeneration: string
+}
+
+export interface CloseGuardHost {
+  setCloseGuard(enabled: boolean): void
+  resolveCloseRequest(requestId: string, allow: boolean): boolean
+}
+
+export type NativeRenderer = MutationHost & Partial<CloseGuardHost> &
   Partial<
     Pick<
       GpuixRenderer,

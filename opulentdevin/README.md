@@ -10,10 +10,13 @@ Requires Bun 1.3.14 or newer, Node 24 (Zuse uses node:sqlite), Git, npm and a wo
 cd opulentdevin
 npm ci --workspaces=false
 bun bootstrap-zuse.ts
-bun run dev
+bun install-native.ts /absolute/path/to/verified-native-delivery
+bun run desktop
 ```
 
 The bootstrap checks out Zuse revision `ff7b4db6b15c8445c323ad39278905e951ecf13b`, installs only server/client/SSH workspace dependencies and builds node-pty. It refuses to reset an existing checkout or use tracked local changes. Set `OPULENTDEVIN_ZUSE_DIR` to an existing matching checkout. The generated `zuse-runtime` link and dependencies are not committed.
+
+`install-native.ts` verifies the reviewed manifest and every file hash, then installs the custom editor and window-close renderer outside npm under `.native-runtime/releases/<binary-sha256>`, retaining older releases. `main.tsx` activates it before dynamically importing GPUIX, so an npm reinstall cannot silently replace the tested native editor with the stock binary. The verified delivery is Linux x64; other platforms need a separately generated, tested build. The source patch and complete native runtime delivery accompany the review checkpoint.
 
 `bun run build` emits the app bundle; `bun run start` runs it with installed native dependencies and the pinned Zuse runtime. This is not a signed platform installer. Neither command publishes a release or deploys a service.
 
@@ -21,12 +24,15 @@ The bootstrap checks out Zuse revision `ff7b4db6b15c8445c323ad39278905e951ecf13b
 
 - `main.tsx` owns a loopback Node Zuse sidecar and the native window. `app.tsx` owns native navigation and environment selection.
 - `backend.ts` uses Zuse's real Effect WebSocket protocol, version handshake and typed RPC group. SQLite, provider drivers, cloud authority, worktrees and permissions remain Zuse-owned.
-- `connection.tsx` reuses Zuse's connection supervisor and timeline driver, including cursor/generation fences. Local reconnect is bounded; remote selection is identity-verified and manually reconnected.
+- `connection.tsx` reuses Zuse's connection supervisor and timeline driver, including descriptor-pinned environment identity, cursor/generation fences, private atomic timeline cache and older-history paging. Local reconnect is bounded; remote selection is identity-verified and manually reconnected.
+- `drafts.ts` stores rich unsent composer state per verified environment/workspace/session, with revision-bound acknowledgement clearing.
 - `outbox.ts` atomically preserves exact send/create identities under private mode 0600. Unknown outcomes remain pending until explicit retry; successful RPC acknowledgement removes the pending payload. This file contains user-authored prompt text and is not an encrypted credential store.
 - `transcript.tsx` renders all canonical message variants and live questions/permissions/plans. Interaction retries retain intent in process memory; restart durability for these interactions is still incomplete.
 - `workbench.tsx`, `editor.tsx` and `terminal-grid.tsx` provide native files, editor, Git and parser-backed PTY surfaces. The terminal parser is headless xterm; no DOM renderer is used.
 - `settings*.tsx` preserves typed provider/model, cloud and SSH workflows. Remote changes require explicit controls; no automatic cloud provisioning occurs on startup.
-- `browser.tsx` paints fresh browser image frames into native GPUI images. Set `OPULENTDEVIN_BROWSER_CDP` to an explicitly authorised loopback CDP endpoint and press Connect. It creates an isolated context and never imports an existing tab/profile/cookies. It does not launch or download a browser. Advanced browser semantics remain under development.
+- `browser.tsx` paints fresh browser image frames into native GPUI images. Set `OPULENTDEVIN_BROWSER_CDP` to an explicitly authorised loopback CDP endpoint and press Connect. It creates an isolated context and never imports an existing tab/profile/cookies. It does not launch or download a browser. Bounded silent recording uses installed ffmpeg; overlays are rasterised into native frames with sharp. Remote forwarding, credential injection, downloads, drag and IME composition remain unsupported.
+
+The GPUIX native input extension renders editable syntax in the existing input TextRuns, emits real UTF-16 caret/selection revisions and accepts revision-fenced selection requests. It preserves native IME and undo ownership; it does not introduce a browser editor or claim full LSP/multi-cursor functionality.
 
 State defaults to `$XDG_DATA_HOME/opulentdevin` or `~/.local/share/opulentdevin`; override with `OPULENTDEVIN_DATA_DIR`. Zuse also has its own configuration-directory policy; changing the data directory alone does not necessarily isolate every provider setting. Tests use controlled temporary state and do not invoke paid inference.
 

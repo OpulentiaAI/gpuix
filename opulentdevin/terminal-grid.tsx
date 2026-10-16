@@ -4,6 +4,7 @@ import type { PtySummary } from './zuse-runtime/packages/contracts/src/pty'
 import type { PtyOwnerId } from './zuse-runtime/packages/contracts/src/ids'
 import type { Palette } from './theme'
 import { TerminalState, terminalDimensions, type TerminalCell, type TerminalSnapshot } from './terminal-state'
+import { createTerminalInput, TERMINAL_INPUT_BLOCKED } from './terminal-input'
 
 export type TerminalGridProps = {
   backend: Backend
@@ -37,18 +38,14 @@ export function TerminalGrid({ backend, terminal, ownerId, palette, onError, onE
   const resizeLock = useRef(false)
   useEffect(() => {
     let live = true
-    let writes = Promise.resolve()
-    let queuedBytes = 0
     let timer: ReturnType<typeof setTimeout> | undefined
     const report = (message: string) => { if (live) { setError(message); callbacks.current.onError(new Error(message)) } }
+    const input = createTerminalInput({ ownerId, ptyId: terminal.ptyId, processEpoch: terminal.processEpoch }, data => backend.terminals.write({ ptyId: terminal.ptyId, ownerId, data }), report)
     const model = new TerminalState(terminal.cols, terminal.rows, terminal.processEpoch, data => {
-      if (!live || terminal.status !== 'running') return
-      if (queuedBytes + data.length > 65536) { report('Terminal input queue is full; wait for the backend to catch up.'); return }
-      queuedBytes += data.length
-      writes = writes.then(async () => { if (live) await backend.terminals.write({ ptyId: terminal.ptyId, ownerId, data }) }).catch(() => report('Terminal input could not be delivered; the failed input was not replayed.')).finally(() => { queuedBytes -= data.length })
+      if (live && terminal.status === 'running') input.enqueue(data)
     })
     state.current = model
-    setError('')
+    setError(input.failed ? TERMINAL_INPUT_BLOCKED : '')
     setRequestedCols(String(cols ?? terminal.cols)); setRequestedRows(String(rows ?? terminal.rows))
     const draw = () => { if (live) { const p = callbacks.current.palette; setSnapshot(model.snapshot({ foreground: p.text, background: p.page })) } }
     const unlisten = model.subscribe(() => { if (!timer) timer = setTimeout(() => { timer = undefined; draw() }, 16) })
@@ -66,7 +63,7 @@ export function TerminalGrid({ backend, terminal, ownerId, palette, onError, onE
       }, () => report('Terminal output stream disconnected. Select the terminal again to replay available output.'))
     }
     subscribe(0, terminal.processEpoch)
-    return () => { live = false; subscription?.cancel(); unlisten(); if (timer) clearTimeout(timer); model.dispose(); if (state.current === model) state.current = null }
+    return () => { live = false; input.dispose(); subscription?.cancel(); unlisten(); if (timer) clearTimeout(timer); model.dispose(); if (state.current === model) state.current = null }
   }, [backend, terminal.ptyId, terminal.processEpoch, ownerId])
   useEffect(() => { const model = state.current; if (model) setSnapshot(model.snapshot({ foreground: palette.text, background: palette.page })) }, [palette])
   const resize = async (nextCols: number, nextRows: number) => {
@@ -84,11 +81,11 @@ export function TerminalGrid({ backend, terminal, ownerId, palette, onError, onE
   useEffect(() => { if (cols !== undefined && rows !== undefined && state.current && (state.current.terminal.cols !== cols || state.current.terminal.rows !== rows)) void resize(cols, rows) }, [cols, rows, terminal.ptyId, terminal.processEpoch])
   return <div testId="terminal-grid-pane" style={{ display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0, minWidth: 0, backgroundColor: palette.page }}>
     <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: 6 }}>
-      <text style={{ fontSize: 11, color: palette.muted }}>{snapshot?.alternate ? 'Alternate screen' : 'Terminal'} · {snapshot?.cols ?? terminal.cols} × {snapshot?.rows ?? terminal.rows} · {focused ? 'Raw keyboard input active' : 'Click the grid to type'}</text>
+      <text style={{ fontSize: 11, color: palette.muted, whiteSpace: 'nowrap', flexShrink: 0, minWidth: 0 }}>{`${snapshot?.alternate ? 'Alternate screen' : 'Terminal'} · ${snapshot?.cols ?? terminal.cols} × ${snapshot?.rows ?? terminal.rows} · ${focused ? 'Raw keyboard input active' : 'Click the grid to type'}`}</text>
       <input testId="terminal-columns" aria-label="Terminal columns" value={requestedCols} onChange={event => setRequestedCols(event.value ?? '')} style={{ width: 52, height: 26, color: palette.text, backgroundColor: palette.elevated }} />
       <input testId="terminal-rows" aria-label="Terminal rows" value={requestedRows} onChange={event => setRequestedRows(event.value ?? '')} style={{ width: 45, height: 26, color: palette.text, backgroundColor: palette.elevated }} />
-      <div testId="terminal-resize" role="button" aria-label="Resize terminal" tabIndex={0} onClick={() => { if (!resizeBusy) void resize(Number(requestedCols), Number(requestedRows)) }} style={{ display: 'flex', padding: 5, backgroundColor: palette.hover, cursor: 'pointer' }}><text style={{ fontSize: 11, color: palette.text }}>{resizeBusy ? 'Resizing…' : 'Resize'}</text></div>
-      <div testId="terminal-interrupt" role="button" aria-label="Send Ctrl-C" tabIndex={0} onClick={() => state.current?.key({ key: 'c', modifiers: { ctrl: true, shift: false, alt: false, cmd: false } })} style={{ display: 'flex', padding: 5, backgroundColor: palette.hover, cursor: 'pointer' }}><text style={{ fontSize: 11, color: palette.text }}>Ctrl-C</text></div>
+      <div testId="terminal-resize" role="button" aria-label="Resize terminal" tabIndex={0} onClick={() => { if (!resizeBusy) void resize(Number(requestedCols), Number(requestedRows)) }} style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', flexShrink: 0, minWidth: 0, padding: 5, backgroundColor: palette.hover, cursor: 'pointer' }}><text style={{ fontSize: 11, color: palette.text, whiteSpace: 'nowrap' }}>{resizeBusy ? 'Resizing…' : 'Resize'}</text></div>
+      <div testId="terminal-interrupt" role="button" aria-label="Send Ctrl-C" tabIndex={0} onClick={() => state.current?.key({ key: 'c', modifiers: { ctrl: true, shift: false, alt: false, cmd: false } })} style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', flexShrink: 0, minWidth: 0, padding: 5, backgroundColor: palette.hover, cursor: 'pointer' }}><text style={{ fontSize: 11, color: palette.text, whiteSpace: 'nowrap' }}>Ctrl-C</text></div>
     </div>
     <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0, overflow: 'scroll', padding: 4 }}>
       <div testId="terminal-grid" role="textbox" aria-label="Interactive terminal grid" aria-description="Raw terminal keyboard input. Control C interrupts; arrows navigate the foreground application." tabIndex={0} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} onKeyDown={event => state.current?.key(event)} onScroll={event => { if (!snapshot?.alternate && event.deltaY) state.current?.scroll(Math.trunc(event.deltaY / (event.precise ? cellHeight : 1))) }} style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, width: (snapshot?.cols ?? terminal.cols) * cellWidth, height: (snapshot?.rows ?? terminal.rows) * cellHeight, backgroundColor: palette.page, borderWidth: 1, borderColor: focused ? palette.accent : palette.border }}>

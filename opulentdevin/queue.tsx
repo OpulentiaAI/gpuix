@@ -6,13 +6,23 @@ import { emptySessionTimelineState, reduceSessionTimelineFrame } from './backend
 import { CommandId, type AgentTurnId } from './zuse-runtime/packages/contracts/src/ids'
 import { ComposerInput } from './zuse-runtime/packages/contracts/src/composer'
 import type { Session, QueueState, QueuedMessage } from './zuse-runtime/packages/contracts/src/session'
+import type { DraftSnapshot } from './drafts'
 import { palettes, type Palette } from './theme'
 
-type Pending = { label: string; execute: () => Promise<unknown>; acknowledged: boolean; enqueued: boolean; composer?: string; running?: boolean }
-const pendingByBackend = new WeakMap<Backend, Map<string, Pending>>()
-export type QueuePanelProps = { backend: Backend; session: Session; input: ComposerInput; onQueued: () => void; onError: (message: string) => void; palette?: Palette }
+export type QueueDraftOwner = { snapshot: () => DraftSnapshot; clearExact: (snapshot: DraftSnapshot) => boolean }
+export function captureQueueDraft(draft: QueueDraftOwner, session: Pick<Session, 'id' | 'projectId'>) {
+  const snapshot = draft.snapshot()
+  if (snapshot.owner.sessionId !== session.id || snapshot.owner.workspaceId !== session.projectId) throw new Error('Queue composer owner does not match the selected session and workspace.')
+  const clearExact = draft.clearExact
+  let completed = false
+  return { input: snapshot.input, complete: () => { if (completed) return false; completed = true; return clearExact(snapshot) } }
+}
 
-export function QueuePanel({ backend, session, input, onQueued, onError, palette = palettes.dark }: QueuePanelProps) {
+type Pending = { label: string; execute: () => Promise<unknown>; acknowledged: boolean; complete?: () => boolean; running?: boolean }
+const pendingByBackend = new WeakMap<Backend, Map<string, Pending>>()
+export type QueuePanelProps = { backend: Backend; session: Session; input: ComposerInput; draft: QueueDraftOwner; onError: (message: string) => void; palette?: Palette }
+
+export function QueuePanel({ backend, session, input, draft, onError, palette = palettes.dark }: QueuePanelProps) {
   const [snapshot, setSnapshot] = useState<{ backend: Backend; sessionId: string; queue: QueueState } | null>(null)
   const [turn, setTurn] = useState<AgentTurnId | null>(null)
   const [busy, setBusy] = useState(false)
@@ -24,8 +34,6 @@ export function QueuePanel({ backend, session, input, onQueued, onError, palette
   current.current = { backend, sessionId: session.id }
   const queue = snapshot?.backend === backend && snapshot.sessionId === session.id ? snapshot.queue : null
   const alive = useRef(true)
-  const latestInput = useRef(input)
-  latestInput.current = input
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const matching = () => alive.current && current.current.backend === backend && current.current.sessionId === session.id
   const style = { padding: 6, borderRadius: 5, backgroundColor: palette.elevated, color: palette.text, cursor: 'pointer' as const, fontSize: 12 }
@@ -59,7 +67,7 @@ export function QueuePanel({ backend, session, input, onQueued, onError, palette
     try {
       if (!action.acknowledged) {
         await action.execute(); action.acknowledged = true
-        if (matching() && action.enqueued && action.composer === JSON.stringify(latestInput.current)) onQueued()
+        if (matching()) action.complete?.()
       }
       await refresh()
       pendingMap().delete(session.id)
@@ -67,11 +75,11 @@ export function QueuePanel({ backend, session, input, onQueued, onError, palette
     } catch (error) { fail(error) }
     finally { action.running = false; running.current = false; if (matching()) setBusy(false) }
   }
-  function mutate(label: string, operation: (commandId: CommandId) => Effect.Effect<unknown, unknown>, enqueued = false) {
+  function mutate(label: string, operation: (commandId: CommandId) => Effect.Effect<unknown, unknown>, complete?: () => boolean) {
     if (busy || retry || running.current || pendingMap().has(session.id)) return
     const commandId = CommandId.make(randomUUID())
     const effect = operation(commandId)
-    void execute({ label, execute: () => backend.run(effect), acknowledged: false, enqueued, composer: enqueued ? JSON.stringify(input) : undefined })
+    void execute({ label, execute: () => backend.run(effect), acknowledged: false, complete })
   }
   function move(item: QueuedMessage, offset: number) {
     if (!queue) return
@@ -86,7 +94,7 @@ export function QueuePanel({ backend, session, input, onQueued, onError, palette
     <div style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}><text style={{ fontWeight: 600 }}>Queue {queue ? `(${queue.items.length})` : ''}</text><text style={{ color: palette.muted, fontSize: 12 }}>{queue ? queue.paused ? 'Paused on server' : 'Ready on server' : 'Loading server state'}</text><div style={style} onClick={() => void refresh().catch(fail)}>Refresh</div></div>
     {retry && <div style={{ gap: 5 }}><text style={{ color: palette.warning, fontSize: 12 }}>{retry.acknowledged ? `${retry.label} acknowledged; refresh failed. Retry only reads server state.` : `${retry.label} has no acknowledgement. Retry reuses the same command and payload.`}</text><div style={style} onClick={() => void execute(retry)}>{busy ? 'Working…' : 'Retry safely'}</div></div>}
     <div style={{ flexDirection: 'row', gap: 6 }}>
-      <div testId="queue-add" style={style} onClick={() => { if (!populated) return; const captured = new ComposerInput({ ...input }); const queueId = randomUUID(); mutate('Enqueue message', commandId => backend.client['messages.queue.add']({ commandId, queueId, sessionId: session.id, input: captured, flush: false }), true) }}>Queue current composer</div>
+      <div testId="queue-add" style={style} onClick={() => { if (!populated) return; try { const captured = captureQueueDraft(draft, session); const queueId = randomUUID(); mutate('Enqueue message', commandId => backend.client['messages.queue.add']({ commandId, queueId, sessionId: session.id, input: captured.input, flush: false }), captured.complete) } catch (error) { fail(error) } }}>Queue current composer</div>
       <div style={style} onClick={() => mutate('Flush queue', commandId => backend.client['messages.queue.flush']({ commandId, sessionId: session.id }))}>Run queued messages</div>
       {turn && !queue?.paused && <div style={style} onClick={() => mutate('Stop turn and pause queue', commandId => backend.client['messages.interrupt']({ commandId, sessionId: session.id, expectedTurnId: turn }))}>Stop turn and pause queue</div>}
       {queue?.paused && <div style={style} onClick={() => mutate('Resume queue', commandId => backend.client['messages.queue.resume']({ commandId, sessionId: session.id }))}>Resume queue</div>}

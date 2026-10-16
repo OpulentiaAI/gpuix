@@ -31,7 +31,10 @@ export function createNativeRenderer(
       return
     }
     try {
-      if (createRendererState(renderer).dispatch(event)) options.onEvent?.(event)
+      const closeRequested = event.eventType === "closeRequested" && event.elementId === 0
+      if (closeRequested) options.onEvent?.(event)
+      const dispatched = createRendererState(renderer).dispatch(event)
+      if (dispatched && !closeRequested) options.onEvent?.(event)
     } catch (dispatchError) {
       options.onError?.(dispatchError)
     }

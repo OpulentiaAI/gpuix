@@ -1,15 +1,20 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { JSX } from '@gpuix/react/jsx-runtime'
 import type { Backend, SessionTimelineState } from './backend'
 import type { Message, Session, SessionInteraction, UserQuestionAnswer } from './zuse-runtime/packages/contracts/src/session.ts'
 import type { PermissionRequest, PermissionDecision } from './zuse-runtime/packages/contracts/src/permission.ts'
-import { CommandId, MessageId } from './zuse-runtime/packages/contracts/src/ids.ts'
+import { CommandId, MessageId, type EnvironmentId } from './zuse-runtime/packages/contracts/src/ids.ts'
 import { findPendingPlanInteraction, type PendingPlanInteraction } from './zuse-runtime/packages/client-runtime/src/plan-interactions.ts'
 import { PLAN_APPROVAL_PROMPT } from './zuse-runtime/packages/utils/src/proposed-plan.ts'
 import { Icon } from './icons'
 import { type Palette } from './theme'
 
-type Props = { backend: Backend | null; session: Session | null; timeline: SessionTimelineState; palette: Palette; onError: (error: string) => void }
+export type TranscriptProps = { environmentId: EnvironmentId; backend: Backend | null; session: Session | null; timeline: SessionTimelineState; palette: Palette; onError: (error: string) => void }
+type Props = TranscriptProps
+export type TranscriptRow = { key: string; content: ReactNode }
+export function transcriptRows(children: ReactNode): TranscriptRow[] {
+  return Children.toArray(children).map((content, index) => ({ key: isValidElement(content) && content.key !== null ? String(content.key) : `status-${index}`, content }))
+}
 type Question = Extract<SessionInteraction, { _tag: 'Question' }>
 const count = (value: number | null) => value === null ? 'Unknown' : value.toLocaleString()
 const duration = (value: number) => `${(value / 1000).toFixed(1)}s`
@@ -50,6 +55,9 @@ function Payload({ value, palette: p }: { value: unknown; palette: Palette }) {
 }
 type IntentStep = (backend: Backend) => Promise<unknown>
 export class RetryIntent {
+  constructor(readonly environmentId: EnvironmentId) {
+    if (!environmentId?.trim()) throw new Error('A verified environment identity is required')
+  }
   state: 'idle' | 'sending' | 'failed' | 'sent' = 'idle'
   error: string | null = null
   private steps: readonly IntentStep[] | null = null
@@ -58,7 +66,8 @@ export class RetryIntent {
   get retained() { return this.steps !== null }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private notify() { for (const listener of this.listeners) listener() }
-  async run(backend: Backend, prepare: () => readonly IntentStep[]) {
+  async run(backend: Backend, environmentId: EnvironmentId, prepare: () => readonly IntentStep[]) {
+    if (environmentId !== this.environmentId) throw new Error('Retry intent belongs to a different environment')
     if (this.state === 'sending' || this.state === 'sent') return
     this.steps ??= prepare()
     this.state = 'sending'; this.error = null; this.notify()
@@ -74,6 +83,10 @@ export class RetryIntent {
       throw cause
     } finally { this.notify() }
   }
+}
+export function transcriptEnvironmentKey(environmentId: EnvironmentId, key: string) {
+  if (!environmentId?.trim()) throw new Error('A verified environment identity is required')
+  return JSON.stringify([environmentId, key])
 }
 const interactionIntents = new Map<string, RetryIntent>()
 const retainedPlans = new Map<string, PendingPlanInteraction>()
@@ -94,14 +107,15 @@ export function planSteps(plan: PendingPlanInteraction, sessionId: Session['id']
   const message = { commandId: CommandId.make(crypto.randomUUID()), clientMessageId: MessageId.make(crypto.randomUUID()), sessionId, text: PLAN_APPROVAL_PROMPT }
   return outcome === 'approved' ? [backend => backend.sessions.setPermissionMode(mode), backend => backend.messages.send(message)] : [backend => backend.sessions.setPermissionMode(mode)]
 }
-function useSubmission(key: string, backend: Backend, onError: Props['onError']) {
-  let intent = interactionIntents.get(key)
-  if (!intent) { intent = new RetryIntent(); interactionIntents.set(key, intent) }
+function useSubmission(environmentId: EnvironmentId, key: string, backend: Backend, onError: Props['onError']) {
+  const scopedKey = transcriptEnvironmentKey(environmentId, key)
+  let intent = interactionIntents.get(scopedKey)
+  if (!intent) { intent = new RetryIntent(environmentId); interactionIntents.set(scopedKey, intent) }
   const stable = intent
   const [, update] = useState(0)
   useEffect(() => stable.subscribe(() => update(n => n + 1)), [stable])
   const submit = async (prepare: () => readonly IntentStep[]) => {
-    try { await stable.run(backend, prepare) } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
+    try { await stable.run(backend, environmentId, prepare) } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
   }
   return { submit, state: stable.state, error: stable.error, retained: stable.retained, busy: stable.state === 'sending' || stable.state === 'sent' }
 }
@@ -137,15 +151,15 @@ function MessageRow({ message, messages, palette: p }: { message: Message; messa
   }
   return <Box testId={`message-${message.id}`} style={{ width: '100%', marginBottom: 18, gap: 4 }}>{body}<Note palette={p}>{message.createdAt.toLocaleTimeString()}</Note></Box>
 }
-function QuestionCard({ question, backend, session, palette: p, actionable, onError }: { question: Question; backend: Backend; session: Session; palette: Palette; actionable: boolean; onError: Props['onError'] }) {
+function QuestionCard({ environmentId, question, backend, session, palette: p, actionable, onError }: { environmentId: EnvironmentId; question: Question; backend: Backend; session: Session; palette: Palette; actionable: boolean; onError: Props['onError'] }) {
   const [answers, setAnswers] = useState<UserQuestionAnswer[]>(question.questions.map((_, questionIndex) => ({ questionIndex, selected: [], other: '' })))
-  const submission = useSubmission(`${session.id}:question:${question.id}`, backend, onError)
+  const submission = useSubmission(environmentId, `${session.id}:question:${question.id}`, backend, onError)
   const valid = answers.every(a => a.selected.length > 0 || (a.other?.trim().length ?? 0) > 0)
   const disabled = submission.retained || !actionable
   return <Card title="Your input is needed" palette={p}>{question.questions.map((q, i) => <Box key={i} style={{ gap: 8 }}><Prose text={q.question} palette={p} /><Note palette={p}>{q.multiSelect ? 'Select any that apply, or write an answer.' : 'Select one, or write an answer.'}</Note>{q.options.map((option, index) => <Button key={index} palette={p} disabled={disabled} label={`${answers[i]?.selected.includes(index) ? 'Selected: ' : ''}${option}`} selected={answers[i]?.selected.includes(index)} action={() => setAnswers(old => old.map((a, j) => j !== i ? a : { ...a, selected: q.multiSelect ? a.selected.includes(index) ? a.selected.filter(v => v !== index) : [...a.selected, index] : a.selected.includes(index) ? [] : [index], other: q.multiSelect ? a.other : '' }))} />)}<input value={answers[i]?.other ?? ''} placeholder="Other answer" readOnly={disabled} onChange={event => setAnswers(old => old.map((a, j) => j !== i ? a : { ...a, other: event.value ?? '', selected: q.multiSelect ? a.selected : [] }))} style={{ width: '100%', height: 36, color: p.text, backgroundColor: p.wash, padding: 8, borderRadius: 6 }} /></Box>)}{!actionable && <Note palette={p}>Waiting for the provider to reconnect this question.</Note>}{submission.error && <Note palette={p} error>{submission.error}</Note>}<Button palette={p} label={submission.state === 'sent' ? 'Answer sent · awaiting confirmation' : submission.state === 'sending' ? 'Sending answer…' : submission.retained ? 'Retry original answer' : 'Submit answers'} disabled={submission.busy || !actionable || (!submission.retained && !valid)} action={() => void submission.submit(() => questionSteps(session.id, question.id, answers.map(a => ({ ...a, other: a.other?.trim() || undefined }))))} /></Card>
 }
-function PermissionCard({ request, backend, palette: p, actionable, onError }: { request: PermissionRequest; backend: Backend; palette: Palette; actionable: boolean; onError: Props['onError'] }) {
-  const submission = useSubmission(`${request.sessionId}:permission:${request.id}`, backend, onError)
+function PermissionCard({ environmentId, request, backend, palette: p, actionable, onError }: { environmentId: EnvironmentId; request: PermissionRequest; backend: Backend; palette: Palette; actionable: boolean; onError: Props['onError'] }) {
+  const submission = useSubmission(environmentId, `${request.sessionId}:permission:${request.id}`, backend, onError)
   const kind = request.kind
   const title = kind._tag === 'Bash' ? 'Run shell command?' : kind._tag === 'FileWrite' ? 'Write file?' : kind._tag === 'Network' ? 'Make network request?' : `Use ${kind.tool}?`
   const detail = kind._tag === 'Bash' ? kind.command : kind._tag === 'FileWrite' ? kind.path : kind._tag === 'Network' ? kind.url : kind.summary
@@ -162,18 +176,18 @@ function PermissionCard({ request, backend, palette: p, actionable, onError }: {
   }
   return <Card title={title} palette={p}><code code={detail} language={kind._tag === 'Bash' ? 'bash' : 'text'} style={{ width: '100%' }} />{request.forcePrompt && <Note palette={p}>This request requires a one-time decision. Persistent approval is unavailable.</Note>}{expired && <Note palette={p}>This provider callback expired. Dismiss it; it cannot be approved.</Note>}{!actionable && <Note palette={p}>Reconnecting approval request…</Note>}<Box style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}><Button palette={p} label={submission.retained ? 'Retry original decision' : expired ? 'Dismiss' : 'Deny'} disabled={submission.busy || !actionable || (expired && submission.retained)} action={() => decide({ _tag: 'Deny' })} /><Button palette={p} label="Allow once" disabled={submission.retained || expired || !actionable} action={() => decide({ _tag: 'AllowOnce' })} />{!request.forcePrompt && !expired && !submission.retained && <><Button palette={p} label="Allow for session" disabled={submission.busy || !actionable} action={() => decide({ _tag: 'AllowForSession' })} /><Button palette={p} label="Always allow in folder" disabled={submission.busy || !actionable} action={() => decide({ _tag: 'AlwaysAllow', scope: 'folder' })} /></>}</Box>{submission.state !== 'idle' && <Note palette={p}>{submission.state === 'sent' ? 'Decision sent · awaiting confirmation' : 'Sending decision…'}</Note>}{submission.error && <Note palette={p} error>{submission.error}</Note>}</Card>
 }
-function PlanCard({ plan, backend, session, palette: p, onError, actionable }: { plan: PendingPlanInteraction; backend: Backend; session: Session; palette: Palette; onError: Props['onError']; actionable: boolean }) {
+function PlanCard({ environmentId, plan, backend, session, palette: p, onError, actionable }: { environmentId: EnvironmentId; plan: PendingPlanInteraction; backend: Backend; session: Session; palette: Palette; onError: Props['onError']; actionable: boolean }) {
   const [feedback, setFeedback] = useState('')
   const key = `${session.id}:plan:${plan.kind === 'permission' ? plan.request.id : plan.sourceMessageId}`
-  const submission = useSubmission(key, backend, onError)
+  const submission = useSubmission(environmentId, key, backend, onError)
   const respond = (outcome: 'approved' | 'cancelled') => {
     if (!actionable) return
-    retainedPlans.set(session.id, plan)
+    retainedPlans.set(transcriptEnvironmentKey(environmentId, session.id), plan)
     void submission.submit(() => planSteps(plan, session.id, outcome, feedback))
   }
   return <Card title="Review proposed plan" palette={p}>{plan.plan && <Prose text={plan.plan} palette={p} />}{plan.kind === 'native' && <input value={feedback} readOnly={submission.retained} placeholder="Optional feedback" onChange={event => setFeedback(event.value ?? '')} style={{ width: '100%', height: 36, color: p.text, backgroundColor: p.wash, padding: 8, borderRadius: 6 }} />}<Box style={{ flexDirection: 'row', gap: 8 }}>{submission.retained ? <Button palette={p} label="Retry original plan decision" disabled={submission.busy || !actionable} action={() => respond('approved')} /> : <><Button palette={p} label="Cancel plan" disabled={!actionable} action={() => respond('cancelled')} /><Button palette={p} label="Approve implementation" disabled={!actionable} action={() => respond('approved')} /></>}</Box>{submission.state !== 'idle' && <Note palette={p}>{submission.state === 'sent' ? 'Decision sent · awaiting confirmation' : 'Sending decision…'}</Note>}{submission.error && <Note palette={p} error>{submission.error}</Note>}</Card>
 }
-export function Transcript({ backend, session, timeline, palette: p, onError }: Props) {
+export function Transcript({ environmentId, backend, session, timeline, palette: p, onError, renderRows }: Props & { renderRows?: (rows: readonly TranscriptRow[]) => ReactNode }) {
   const [attachedQuestions, setAttachedQuestions] = useState<ReadonlySet<string>>(new Set())
   const [livePermissions, setLivePermissions] = useState<ReadonlyMap<string, PermissionRequest>>(new Map())
   const [authoritySession, setAuthoritySession] = useState<string | null>(null)
@@ -207,14 +221,15 @@ export function Transcript({ backend, session, timeline, palette: p, onError }: 
       })
     }, error => { if (active) { setLivePermissions(new Map()); onErrorRef.current(String(error)) } })
     return () => { active = false; questions.cancel(); permissions.cancel() }
-  }, [backend, session?.id])
+  }, [backend, session?.id, environmentId])
   const messages = timeline.projection?.messages ?? []
   const interactions = timeline.projection?.interactions ?? []
   const coherent = session !== null && authoritySession === session.id && timeline.phase === 'live'
   const detectedPlan = session && timeline.projection ? findPendingPlanInteraction({ messages, requests: [...livePermissions.values()], sessionId: session.id, providerId: session.providerId, permissionMode: timeline.projection.permissionMode, isRunning: timeline.projection.status === 'running' }) : null
-  const retainedPlan = session ? retainedPlans.get(session.id) : undefined
+  const retainedPlan = session ? retainedPlans.get(transcriptEnvironmentKey(environmentId, session.id)) : undefined
   const retainedKey = retainedPlan && session ? `${session.id}:plan:${retainedPlan.kind === 'permission' ? retainedPlan.request.id : retainedPlan.sourceMessageId}` : null
-  const retainedState = retainedKey ? interactionIntents.get(retainedKey)?.state : undefined
+  const retainedState = retainedKey ? interactionIntents.get(transcriptEnvironmentKey(environmentId, retainedKey))?.state : undefined
   const plan = retainedPlan && (retainedState === 'sending' || retainedState === 'failed') ? retainedPlan : detectedPlan
-  return <Box testId="session-transcript" style={{ width: '100%', gap: 12 }}>{timeline.error && <Note palette={p} error>{timeline.error}</Note>}{timeline.phase !== 'live' && <Note palette={p}>{timeline.phase === 'deleted' ? 'This session was deleted.' : `Timeline ${timeline.phase} · controls wait for live state.`}</Note>}{messages.map(message => <MessageRow key={message.id} message={message} messages={messages} palette={p} />)}{backend && session && interactions.map(item => item._tag === 'Question' ? <QuestionCard key={`${session.id}:question:${item.id}`} question={item} backend={backend} session={session} palette={p} actionable={coherent && attachedQuestions.has(item.id)} onError={onError} /> : plan?.kind === 'permission' && plan.request.id === item.request.id ? null : <PermissionCard key={`${session.id}:permission:${item.id}`} request={livePermissions.get(item.request.id) ?? item.request} backend={backend} palette={p} actionable={coherent && livePermissions.has(item.request.id)} onError={onError} />)}{backend && session && plan && <PlanCard key={`${session.id}:plan:${plan.kind === 'permission' ? plan.request.id : plan.sourceMessageId}`} plan={plan} backend={backend} session={session} palette={p} actionable={timeline.phase === 'live' && (plan.kind !== 'permission' || (coherent && livePermissions.has(plan.request.id) && livePermissions.get(plan.request.id)?.recoveryState !== 'expired'))} onError={onError} />}</Box>
+  const content = <Box testId="session-transcript" style={{ width: '100%', gap: 12 }}>{timeline.error && <Note palette={p} error>{timeline.error}</Note>}{timeline.phase !== 'live' && <Note palette={p}>{timeline.phase === 'deleted' ? 'This session was deleted.' : `Timeline ${timeline.phase} · controls wait for live state.`}</Note>}{messages.map(message => <MessageRow key={message.id} message={message} messages={messages} palette={p} />)}{backend && session && interactions.map(item => item._tag === 'Question' ? <QuestionCard environmentId={environmentId} key={transcriptEnvironmentKey(environmentId, `${session.id}:question:${item.id}`)} question={item} backend={backend} session={session} palette={p} actionable={coherent && attachedQuestions.has(item.id)} onError={onError} /> : plan?.kind === 'permission' && plan.request.id === item.request.id ? null : <PermissionCard environmentId={environmentId} key={transcriptEnvironmentKey(environmentId, `${session.id}:permission:${item.id}`)} request={livePermissions.get(item.request.id) ?? item.request} backend={backend} palette={p} actionable={coherent && livePermissions.has(item.request.id)} onError={onError} />)}{backend && session && plan && <PlanCard environmentId={environmentId} key={transcriptEnvironmentKey(environmentId, `${session.id}:plan:${plan.kind === 'permission' ? plan.request.id : plan.sourceMessageId}`)} plan={plan} backend={backend} session={session} palette={p} actionable={timeline.phase === 'live' && (plan.kind !== 'permission' || (coherent && livePermissions.has(plan.request.id) && livePermissions.get(plan.request.id)?.recoveryState !== 'expired'))} onError={onError} />}</Box>
+  return renderRows ? renderRows(transcriptRows(content.props.children)) : content
 }
